@@ -19,6 +19,24 @@ It starts services through a detached supervisor process, keeps live state on di
   Current process management relies on `ps` and POSIX signals.
 - `git` is only required for the branch-related UI actions (`pull` and `checkout`).
 
+## Installation
+
+For local development, install dependencies, build the CLI, and link the `dev` command globally:
+
+```bash
+yarn install
+yarn build
+npm link
+```
+
+After that, the command is available in your shell:
+
+```bash
+dev --help
+```
+
+If you change the CLI source code, run `yarn build` again to refresh `dist`.
+
 ## How It Works
 
 When you run `dev up <project>` or `dev ui <project>`, the CLI ensures a local supervisor process is running for that project. Commands such as `status`, `ui`, `up`, and `down` talk to that supervisor over a local socket and read the persisted state file when needed.
