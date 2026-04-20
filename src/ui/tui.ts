@@ -404,15 +404,17 @@ export function buildHeaderContent(
   width: number,
 ): string {
   const contentWidth = Math.max(width - 2, 10);
+  const bodyInset = contentWidth > 12 ? 2 : 1;
+  const bodyWidth = Math.max(contentWidth - bodyInset * 2, 8);
   const title = truncate(project, contentWidth).trimEnd();
   const titlePadding = Math.max(Math.floor((contentWidth - title.length) / 2), 0);
-  const summaryWidth = Math.min(serviceSummary.length, Math.max(contentWidth - 12, 8));
-  const metricsWidth = Math.max(contentWidth - summaryWidth - 2, 0);
+  const summaryWidth = Math.min(serviceSummary.length, Math.max(bodyWidth - 12, 8));
+  const metricsWidth = Math.max(bodyWidth - summaryWidth - 2, 0);
   const left = truncate(serviceSummary, summaryWidth).trimEnd();
   const right = metricsWidth > 0 ? truncate(metricsText, metricsWidth).trimEnd() : "";
-  const spacer = right ? " ".repeat(Math.max(contentWidth - left.length - right.length, 1)) : "";
+  const spacer = right ? " ".repeat(Math.max(bodyWidth - left.length - right.length, 1)) : "";
 
-  return `${" ".repeat(titlePadding)}{bold}${title}{/bold}\n${left}${spacer}${right}`;
+  return `${" ".repeat(titlePadding)}{bold}${title}{/bold}\n${" ".repeat(bodyInset)}${left}${spacer}${right}${" ".repeat(bodyInset)}`;
 }
 
 export function buildShortcutLine(selected: ManagedServiceState | null, hasLogs = false): string {

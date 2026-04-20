@@ -670,10 +670,10 @@ test("buildShortcutLine shows restart and clear logs only when available", async
     "CPU 23%  RAM 5.2GB/10.8GB",
     48,
   );
-  assert.match(headerContent, /^\s+\{bold\}amigo\{\/bold\}\nRunning 1\/2 services/u);
+  assert.match(headerContent, /^\s+\{bold\}amigo\{\/bold\}\n\s{2}Running 1\/2 services/u);
   assert.match(headerContent, /CPU 23%/u);
   assert.match(headerContent, /RAM 5\.2GB/u);
-  assert.match(headerContent, /…$/u);
+  assert.match(headerContent, /…\s{2}$/u);
 });
 
 test("buildLogViewerCommand uses the native terminal viewer script", async () => {
