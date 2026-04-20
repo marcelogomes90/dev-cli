@@ -612,9 +612,11 @@ test("buildShortcutLine shows restart and clear logs only when available", async
   assert.match(buildShortcutLine(runningSelected, true), /\[r\] Restart/);
   assert.match(buildShortcutLine(runningSelected, true), /\[c\] Clear logs/);
   assert.doesNotMatch(buildShortcutLine(runningSelected, true), /\[p\] Pull/);
+  assert.doesNotMatch(buildShortcutLine(runningSelected, true), /\[d\] Branch/);
   assert.doesNotMatch(buildShortcutLine(runningSelected, false), /\[c\] Clear logs/);
   assert.doesNotMatch(buildShortcutLine(stoppedSelected, true), /\[r\] Restart/);
   assert.match(buildShortcutLine(stoppedSelected, true), /\[p\] Pull/);
+  assert.match(buildShortcutLine(stoppedSelected, true), /\[d\] Branch/);
 
   const layout = getSupervisorPaneLayout(100);
   assert.equal(layout.servicesWidth, 44);
@@ -1252,6 +1254,56 @@ test("supervisor checkout-branch writes git action results to the service log", 
     const logContent = await readFile(state.services.api.logPath, "utf8");
     assert.match(logContent, /\[dev-cli\] Running git checkout main\.\.\./);
     assert.match(logContent, /\[dev-cli\] Checked out main\./);
+  } finally {
+    await daemon.shutdown().catch(() => {});
+    await clearSupervisorFiles(projectName);
+  }
+});
+
+test("supervisor checkout-branch fails while the service is running", async () => {
+  const projectName = `dev-cli-checkout-running-${Date.now()}`;
+  const { fixtureDir } = await createGitPullFixture(projectName);
+  const {
+    clearSupervisorFiles,
+    loadProjectConfig,
+    readSupervisorState,
+    sendSupervisorRequest,
+    SupervisorDaemon,
+  } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  const config = await loadProjectConfig(projectName, fixtureDir);
+  const daemon = await SupervisorDaemon.create(projectName, fixtureDir);
+
+  try {
+    await daemon.start();
+
+    await waitFor(async () => {
+      const state = await readSupervisorState(projectName);
+      assert.ok(state);
+      await stat(state.socketPath);
+    });
+
+    const startResponse = await sendSupervisorRequest(projectName, {
+      id: `start-${Date.now()}`,
+      targets: ["api"],
+      type: "start",
+    });
+    assert.equal(startResponse.ok, true);
+
+    await waitFor(async () => {
+      const state = await readSupervisorState(projectName);
+      assert.equal(state?.services.api.status, "running");
+    });
+
+    const checkoutResponse = await sendSupervisorRequest(projectName, {
+      branch: "main",
+      id: `checkout-${Date.now()}`,
+      service: "api",
+      type: "checkout-branch",
+    });
+
+    assert.equal(checkoutResponse.ok, false);
+    assert.equal(checkoutResponse.results?.[0]?.message, "api cannot switch branch from status running.");
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);

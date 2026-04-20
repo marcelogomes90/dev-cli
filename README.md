@@ -210,7 +210,7 @@ The built-in UI lets you manage services individually after the supervisor is ru
 ### Git actions
 
 - `p`: run `git pull --rebase` for a stopped git service
-- `d`: prompt for a branch name and run `git checkout`
+- `d`: prompt for a branch name and run `git checkout` for a stopped git service
 
 ## Typical Workflow
 

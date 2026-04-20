@@ -452,9 +452,19 @@ export class SupervisorDaemon {
       return context;
     }
 
+    const { entry, serviceName: targetService } = context;
+    if (entry.status !== "stopped") {
+      await this.appendSupervisorLog(targetService, `${targetService} cannot switch branch from status ${entry.status}.`);
+      return {
+        service: targetService,
+        ok: false,
+        message: `${targetService} cannot switch branch from status ${entry.status}.`,
+      };
+    }
+
     if (!targetBranch) {
       return {
-        service: context.serviceName,
+        service: targetService,
         ok: false,
         message: "Branch name is required.",
       };

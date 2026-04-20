@@ -438,7 +438,7 @@ export function buildShortcutLine(selected: ManagedServiceState | null, hasLogs 
     shortcuts.push("[p] Pull");
   }
 
-  if (selected?.isGit && selected.status !== "installing") {
+  if (selected?.isGit && selected.status === "stopped") {
     shortcuts.push("[d] Branch");
   }
 
@@ -896,8 +896,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return;
       }
 
-      if (selected.status === "installing") {
-        setFooterMessage("warning", `${selected.service} cannot switch branch while installing.`);
+      if (selected.status !== "stopped") {
+        setFooterMessage("warning", `${selected.service} cannot switch branch from status ${selected.status}.`);
         void render();
         return;
       }
