@@ -81,6 +81,7 @@ test("runInitFlow writes a .devrc.yml with groups, services, and dependencies", 
   const { runInitFlow } = await import(path.join(projectRoot, "dist/lib.js"));
   const prompter = new FakePrompter([
     "amigo",
+    "",
     "infra",
     true,
     "api",
@@ -125,6 +126,7 @@ test("runInitFlow omits optional fields when they are not set", async () => {
   const { runInitFlow } = await import(path.join(projectRoot, "dist/lib.js"));
   const prompter = new FakePrompter([
     "solo",
+    "",
     "api",
     false,
     "web",
@@ -153,6 +155,7 @@ test("runInitFlow overwrites an existing config after confirmation", async () =>
   const prompter = new FakePrompter([
     true,
     "new-project",
+    "",
     "api",
     false,
     "worker",
@@ -193,6 +196,7 @@ test("runInitFlow rejects duplicate names and required blanks before continuing"
   const prompter = new FakePrompter([
     "",
     "validated",
+    "",
     "api",
     true,
     "api",

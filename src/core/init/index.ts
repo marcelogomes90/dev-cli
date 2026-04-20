@@ -260,7 +260,7 @@ async function collectDependencies(prompter: InitPrompter, services: ServiceDraf
   }
 }
 
-function buildConfigInput(project: string, groups: GroupDraft[], services: ServiceDraft[]): ProjectConfigInput {
+function buildConfigInput(project: string, groups: GroupDraft[], services: ServiceDraft[], editor?: string): ProjectConfigInput {
   const groupEntries: ProjectConfigInput["groups"] = Object.fromEntries(
     groups.map((group) => [
       group.name,
@@ -296,11 +296,17 @@ function buildConfigInput(project: string, groups: GroupDraft[], services: Servi
     }),
   );
 
-  return {
+  const config: ProjectConfigInput = {
     groups: groupEntries,
     project,
     services: serviceEntries,
   };
+
+  if (editor) {
+    config.editor = editor;
+  }
+
+  return config;
 }
 
 export function renderInitConfigYaml(config: ProjectConfigInput): string {
@@ -329,6 +335,7 @@ export async function runInitFlow({ cwd = process.cwd(), prompter }: RunInitOpti
   }
 
   const project = await promptRequiredValue(prompter, "Project name:");
+  const editor = await promptOptionalValue(prompter, "Editor command (e.g. code, cursor — leave blank to skip):");
   prompter.write("\nCreate workspace groups.\n");
   const groups = await collectGroups(prompter);
   prompter.write("\nCreate workspace services.\n");
@@ -336,7 +343,7 @@ export async function runInitFlow({ cwd = process.cwd(), prompter }: RunInitOpti
   prompter.write("\nConfigure service dependencies.\n");
   await collectDependencies(prompter, services);
 
-  const config = buildConfigInput(project, groups, services);
+  const config = buildConfigInput(project, groups, services, editor);
   const yaml = renderInitConfigYaml(config);
   prompter.write(`\nPreview for ${targetFilename}:\n\n${yaml}`);
 

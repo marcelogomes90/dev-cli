@@ -30,6 +30,7 @@ export const projectConfigSchema = z.object({
     })
     .optional(),
   services: z.record(z.string().min(1), serviceSchema),
+  editor: z.string().min(1).optional(),
 });
 
 export type ProjectConfigInput = z.infer<typeof projectConfigSchema>;

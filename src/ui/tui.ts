@@ -1,6 +1,6 @@
 import os from "node:os";
 import { open as openFile, stat } from "node:fs/promises";
-import { execFile, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import blessed from "blessed";
 import type { ProjectConfig } from "../core/config";
@@ -446,6 +446,10 @@ export function buildShortcutLine(selected: ManagedServiceState | null, hasLogs 
 
   if (hasLogs) {
     shortcuts.push("[c] Clear logs");
+  }
+
+  if (selected) {
+    shortcuts.push("[e] Editor");
   }
 
   shortcuts.push("[v] View logs", "[q] Quit");
@@ -1217,6 +1221,30 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       if (mode === "navigate") {
         void runSelectedServiceAction("clear-logs");
       }
+    });
+    screen.key(["e"], () => {
+      if (mode !== "navigate" || !selectedService) return;
+
+      const service = config.services[selectedService];
+      const editor = config.editor ?? "code";
+
+      const child = spawn(editor, [service.cwd], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.on("error", (err) => {
+        const msg =
+          (err as NodeJS.ErrnoException).code === "ENOENT"
+            ? `Editor "${editor}" not found. Check your config.`
+            : `Failed to open editor: ${err.message}`;
+        setFooterMessage("error", msg);
+        renderFooter();
+        screen.render();
+      });
+      child.unref();
+      setFooterMessage("info", `Opening ${service.cwd} in ${editor}…`);
+      renderFooter();
+      screen.render();
     });
     screen.key(["enter"], () => {
       if (mode === "branchPrompt") {

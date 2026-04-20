@@ -30,4 +30,5 @@ export interface ProjectConfig {
   groups: Record<string, GroupConfig>;
   hooks: HooksConfig;
   services: Record<string, ServiceConfig>;
+  editor?: string;
 }

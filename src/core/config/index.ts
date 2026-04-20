@@ -162,6 +162,7 @@ export async function loadProjectConfig(projectName: string, cwd = process.cwd()
 
   return {
     configPath,
+    editor: input.editor,
     groups,
     hooks: normalizeHookCommands(input.hooks),
     project: input.project,
