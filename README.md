@@ -43,6 +43,16 @@ When you run `dev up <project>` or `dev ui <project>`, the CLI ensures a local s
 
 This keeps the UI responsive and allows service control commands to operate on the same source of truth.
 
+## Initialize a Workspace
+
+Use `dev init` to create a `.devrc.yml` through an interactive wizard.
+
+```bash
+dev init
+```
+
+The wizard asks for the project name, groups, services, startup options, and service dependencies, then shows the final YAML before writing it.
+
 ## Configuration
 
 Create a `.devrc.yml` or `.devrc.yaml` in the workspace root:
@@ -162,6 +172,14 @@ Stops all services managed by the supervisor and shuts the supervisor down.
 
 ```bash
 dev down amigo-workspace
+```
+
+### `dev init`
+
+Creates a `.devrc.yml` in the current directory through an interactive setup flow.
+
+```bash
+dev init
 ```
 
 Behavior:

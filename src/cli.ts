@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { registerDownCommand } from "./commands/down";
+import { registerInitCommand } from "./commands/init";
 import { registerStatusCommand } from "./commands/status";
 import { registerUiCommand } from "./commands/ui";
 import { registerUpCommand } from "./commands/up";
@@ -12,6 +13,7 @@ export function createCli(): Command {
     .description("Declarative local environment orchestration")
     .version("0.1.0");
 
+  registerInitCommand(program);
   registerUpCommand(program);
   registerUiCommand(program);
   registerStatusCommand(program);

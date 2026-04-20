@@ -21,8 +21,230 @@ test("dev --help lists core commands", async () => {
   assert.match(result.stdout, /\bui\b/);
   assert.match(result.stdout, /\bdown\b/);
   assert.match(result.stdout, /\bstatus\b/);
+  assert.match(result.stdout, /\binit\b/);
   assert.doesNotMatch(result.stdout, /\bdoctor\b/);
   assert.doesNotMatch(result.stdout, /\brestart\b/);
+});
+
+class FakePrompter {
+  constructor(answers) {
+    this.answers = [...answers];
+    this.messages = [];
+  }
+
+  nextAnswer() {
+    assert.ok(this.answers.length > 0, "Missing answer for prompt.");
+    return this.answers.shift();
+  }
+
+  async prompt(message) {
+    this.messages.push(message);
+    return this.nextAnswer();
+  }
+
+  async confirm(message) {
+    this.messages.push(message);
+    return this.nextAnswer();
+  }
+
+  async select(message) {
+    this.messages.push(message);
+    return this.nextAnswer();
+  }
+
+  async selectMany(message) {
+    this.messages.push(message);
+    return this.nextAnswer();
+  }
+
+  write(message) {
+    this.messages.push(message);
+  }
+
+  close() {}
+}
+
+test("dev init fails without an interactive terminal", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-init-no-tty-"));
+  const result = await execa("node", [cliEntry, "init"], {
+    cwd: fixtureDir,
+    input: "",
+    reject: false,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /interactive terminal/);
+});
+
+test("runInitFlow writes a .devrc.yml with groups, services, and dependencies", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-init-config-"));
+  const { runInitFlow } = await import(path.join(projectRoot, "dist/lib.js"));
+  const prompter = new FakePrompter([
+    "amigo",
+    "infra",
+    true,
+    "api",
+    false,
+    "redis",
+    "infra",
+    ".",
+    "docker run redis",
+    "",
+    true,
+    true,
+    "backend",
+    "api",
+    "./services/api",
+    "yarn dev",
+    "yarn",
+    false,
+    false,
+    false,
+    true,
+    ["redis"],
+    true,
+  ]);
+
+  const result = await runInitFlow({ cwd: fixtureDir, prompter });
+
+  assert.equal(result.written, true);
+  assert.equal(result.project, "amigo");
+
+  const fileContent = await readFile(path.join(fixtureDir, ".devrc.yml"), "utf8");
+  assert.match(fileContent, /^project: amigo/m);
+  assert.match(fileContent, /infra:\n    services:\n      - redis/m);
+  assert.match(fileContent, /api:\n    services:\n      - backend/m);
+  assert.match(fileContent, /installCommand: yarn/m);
+  assert.match(fileContent, /autostart: false/m);
+  assert.match(fileContent, /dependsOn:\n      - redis/m);
+  assert.doesNotMatch(fileContent, /session:/);
+});
+
+test("runInitFlow omits optional fields when they are not set", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-init-minimal-"));
+  const { runInitFlow } = await import(path.join(projectRoot, "dist/lib.js"));
+  const prompter = new FakePrompter([
+    "solo",
+    "api",
+    false,
+    "web",
+    "api",
+    ".",
+    "npm run dev",
+    "",
+    true,
+    false,
+    true,
+  ]);
+
+  await runInitFlow({ cwd: fixtureDir, prompter });
+
+  const fileContent = await readFile(path.join(fixtureDir, ".devrc.yml"), "utf8");
+  assert.doesNotMatch(fileContent, /installCommand:/);
+  assert.doesNotMatch(fileContent, /dependsOn:/);
+  assert.doesNotMatch(fileContent, /autostart:/);
+});
+
+test("runInitFlow overwrites an existing config after confirmation", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-init-overwrite-"));
+  await writeFile(path.join(fixtureDir, ".devrc.yml"), "project: old\n", "utf8");
+
+  const { runInitFlow } = await import(path.join(projectRoot, "dist/lib.js"));
+  const prompter = new FakePrompter([
+    true,
+    "new-project",
+    "api",
+    false,
+    "worker",
+    "api",
+    ".",
+    "node worker.js",
+    "",
+    true,
+    false,
+    true,
+  ]);
+
+  const result = await runInitFlow({ cwd: fixtureDir, prompter });
+
+  assert.equal(result.written, true);
+  const fileContent = await readFile(path.join(fixtureDir, ".devrc.yml"), "utf8");
+  assert.match(fileContent, /^project: new-project/m);
+});
+
+test("runInitFlow returns without writing when overwrite is declined", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-init-skip-overwrite-"));
+  const configPath = path.join(fixtureDir, ".devrc.yml");
+  await writeFile(configPath, "project: old\n", "utf8");
+
+  const { runInitFlow } = await import(path.join(projectRoot, "dist/lib.js"));
+  const result = await runInitFlow({
+    cwd: fixtureDir,
+    prompter: new FakePrompter([false]),
+  });
+
+  assert.equal(result.written, false);
+  assert.equal(await readFile(configPath, "utf8"), "project: old\n");
+});
+
+test("runInitFlow rejects duplicate names and required blanks before continuing", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-init-validation-"));
+  const { runInitFlow } = await import(path.join(projectRoot, "dist/lib.js"));
+  const prompter = new FakePrompter([
+    "",
+    "validated",
+    "api",
+    true,
+    "api",
+    "worker",
+    false,
+    "web",
+    "api",
+    "",
+    ".",
+    "",
+    "npm run dev",
+    "",
+    true,
+    true,
+    "web",
+    "job",
+    "worker",
+    ".",
+    "node worker.js",
+    "",
+    true,
+    false,
+    true,
+    ["job"],
+    false,
+    true,
+  ]);
+
+  await runInitFlow({ cwd: fixtureDir, prompter });
+
+  const fileContent = await readFile(path.join(fixtureDir, ".devrc.yml"), "utf8");
+  assert.match(fileContent, /^project: validated/m);
+  assert.match(fileContent, /dependsOn:\n      - job/m);
+  assert.ok(prompter.messages.some((message) => message.includes("This value is required.")));
+  assert.ok(prompter.messages.some((message) => message.includes('Group "api" already exists.')));
+  assert.ok(prompter.messages.some((message) => message.includes('Service "web" already exists.')));
+});
+
+test("runInitFlow fails when both config filenames already exist", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-init-conflict-"));
+  await writeFile(path.join(fixtureDir, ".devrc.yml"), "project: one\n", "utf8");
+  await writeFile(path.join(fixtureDir, ".devrc.yaml"), "project: two\n", "utf8");
+
+  const { runInitFlow } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  await assert.rejects(
+    runInitFlow({
+      cwd: fixtureDir,
+      prompter: new FakePrompter([]),
+    }),
+    /Found both .devrc.yml and .devrc.yaml/,
+  );
 });
 
 test("loadProjectConfig resolves relative paths and defaults", async () => {
