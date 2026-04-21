@@ -1,6 +1,6 @@
 import os from "node:os";
 import { open as openFile, stat } from "node:fs/promises";
-import { execFile, spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import blessed from "blessed";
 import type { ProjectConfig } from "../core/config";
@@ -58,6 +58,18 @@ export interface LogViewerCommand {
   command: string;
 }
 
+export interface TerminalLaunchCommand {
+  args: string[];
+  command: string;
+  cwd: string;
+  label: string;
+}
+
+interface TerminalLaunchOptions {
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+}
+
 interface LogViewerProgram {
   disableMouse(): void;
   enableMouse(): void;
@@ -82,6 +94,12 @@ type SpawnSyncLike = (
   args: string[],
   options: { stdio: "inherit" },
 ) => { error?: NodeJS.ErrnoException; status: number | null };
+
+type SpawnLike = (
+  command: string,
+  args: string[],
+  options: { cwd: string; detached: true; stdio: "ignore" },
+) => ChildProcess;
 
 const LOG_TAIL_LINES = 320;
 const LOG_TAIL_READ_BYTES = 192 * 1024;
@@ -568,6 +586,211 @@ export function buildHeaderContent(
   return `${" ".repeat(titlePadding)}{bold}${title}{/bold}\n${" ".repeat(bodyInset)}${left}${spacer}${right}${" ".repeat(bodyInset)}`;
 }
 
+function quotePosix(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function quoteAppleScriptString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function quoteWindowsCmdArg(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function buildShellCdCommand(cwd: string): string {
+  return `cd ${quotePosix(cwd)}`;
+}
+
+function detectTerminalIds(env: NodeJS.ProcessEnv): string[] {
+  const ids: string[] = [];
+  const add = (id: string) => {
+    if (!ids.includes(id)) {
+      ids.push(id);
+    }
+  };
+  const termProgram = env.TERM_PROGRAM?.toLowerCase();
+  const bundleId = env.__CFBundleIdentifier?.toLowerCase();
+  const term = env.TERM?.toLowerCase();
+
+  if (env.ALACRITTY_WINDOW_ID || env.ALACRITTY_SOCKET || bundleId === "org.alacritty") {
+    add("alacritty");
+  }
+
+  if (env.WEZTERM_PANE || env.WEZTERM_EXECUTABLE || termProgram === "wezterm" || bundleId === "com.github.wez.wezterm") {
+    add("wezterm");
+  }
+
+  if (env.KITTY_WINDOW_ID || env.KITTY_LISTEN_ON || term === "xterm-kitty" || bundleId === "net.kovidgoyal.kitty") {
+    add("kitty");
+  }
+
+  if (env.GHOSTTY_RESOURCES_DIR || bundleId === "com.mitchellh.ghostty") {
+    add("ghostty");
+  }
+
+  if (termProgram === "iterm.app" || bundleId === "com.googlecode.iterm2") {
+    add("iterm");
+  }
+
+  if (termProgram === "apple_terminal" || bundleId === "com.apple.terminal") {
+    add("terminal-app");
+  }
+
+  if (env.WT_SESSION) {
+    add("windows-terminal");
+  }
+
+  if (env.KONSOLE_VERSION) {
+    add("konsole");
+  }
+
+  if (env.GNOME_TERMINAL_SCREEN || env.GNOME_TERMINAL_SERVICE) {
+    add("gnome-terminal");
+  }
+
+  return ids;
+}
+
+function createTerminalLaunchCommand(id: string, cwd: string, platform: NodeJS.Platform): TerminalLaunchCommand | null {
+  switch (id) {
+    case "alacritty":
+      return platform === "darwin"
+        ? { args: ["-na", "Alacritty", "--args", "--working-directory", cwd], command: "open", cwd, label: "Alacritty" }
+        : { args: ["--working-directory", cwd], command: "alacritty", cwd, label: "Alacritty" };
+    case "ghostty":
+      return platform === "darwin"
+        ? { args: ["-na", "Ghostty", "--args", `--working-directory=${cwd}`], command: "open", cwd, label: "Ghostty" }
+        : { args: [`--working-directory=${cwd}`], command: "ghostty", cwd, label: "Ghostty" };
+    case "gnome-terminal":
+      return { args: ["--working-directory", cwd], command: "gnome-terminal", cwd, label: "GNOME Terminal" };
+    case "iterm": {
+      const script = [
+        'tell application "iTerm"',
+        "  activate",
+        "  create window with default profile",
+        "  tell current session of current window",
+        `    write text ${quoteAppleScriptString(buildShellCdCommand(cwd))}`,
+        "  end tell",
+        "end tell",
+      ].join("\n");
+      return { args: ["-e", script], command: "osascript", cwd, label: "iTerm" };
+    }
+    case "kitty":
+      return { args: ["--directory", cwd], command: "kitty", cwd, label: "Kitty" };
+    case "konsole":
+      return { args: ["--workdir", cwd], command: "konsole", cwd, label: "Konsole" };
+    case "terminal-app": {
+      const script = [
+        'tell application "Terminal"',
+        "  activate",
+        `  do script ${quoteAppleScriptString(buildShellCdCommand(cwd))}`,
+        "end tell",
+      ].join("\n");
+      return { args: ["-e", script], command: "osascript", cwd, label: "Terminal" };
+    }
+    case "wezterm":
+      return { args: ["start", "--cwd", cwd], command: "wezterm", cwd, label: "WezTerm" };
+    case "windows-cmd":
+      return {
+        args: ["/c", "start", "", "cmd.exe", "/K", `cd /d ${quoteWindowsCmdArg(cwd)}`],
+        command: "cmd.exe",
+        cwd,
+        label: "Command Prompt",
+      };
+    case "windows-terminal":
+      return { args: ["-w", "new", "-d", cwd], command: "wt", cwd, label: "Windows Terminal" };
+    case "xfce4-terminal":
+      return { args: ["--working-directory", cwd], command: "xfce4-terminal", cwd, label: "XFCE Terminal" };
+    case "x-terminal-emulator":
+      return { args: [], command: "x-terminal-emulator", cwd, label: "x-terminal-emulator" };
+    case "xterm":
+      return { args: [], command: "xterm", cwd, label: "xterm" };
+    default:
+      return null;
+  }
+}
+
+export function buildTerminalLaunchCommands(
+  cwd: string,
+  { env = process.env, platform = process.platform }: TerminalLaunchOptions = {},
+): TerminalLaunchCommand[] {
+  const ids = detectTerminalIds(env);
+
+  if (platform === "darwin") {
+    ids.push("terminal-app", "iterm", "alacritty", "wezterm", "kitty", "ghostty");
+  } else if (platform === "win32") {
+    ids.push("windows-terminal", "windows-cmd");
+  } else {
+    ids.push(
+      "x-terminal-emulator",
+      "gnome-terminal",
+      "konsole",
+      "xfce4-terminal",
+      "alacritty",
+      "wezterm",
+      "kitty",
+      "ghostty",
+      "xterm",
+    );
+  }
+
+  const commands: TerminalLaunchCommand[] = [];
+  for (const id of ids) {
+    const command = createTerminalLaunchCommand(id, cwd, platform);
+    if (
+      command &&
+      !commands.some((candidate) => candidate.command === command.command && candidate.args.join("\0") === command.args.join("\0"))
+    ) {
+      commands.push(command);
+    }
+  }
+
+  return commands;
+}
+
+export async function launchTerminal(
+  commands: TerminalLaunchCommand[],
+  spawnImpl: SpawnLike = spawn,
+): Promise<{ command?: TerminalLaunchCommand; error?: NodeJS.ErrnoException; ok: boolean }> {
+  let lastError: NodeJS.ErrnoException | undefined;
+
+  for (const command of commands) {
+    const result = await new Promise<{ error?: NodeJS.ErrnoException; ok: boolean }>((resolve) => {
+      let settled = false;
+      const settle = (result: { error?: NodeJS.ErrnoException; ok: boolean }) => {
+        if (!settled) {
+          settled = true;
+          resolve(result);
+        }
+      };
+
+      try {
+        const child = spawnImpl(command.command, command.args, {
+          cwd: command.cwd,
+          detached: true,
+          stdio: "ignore",
+        });
+        child.once("spawn", () => {
+          child.unref();
+          settle({ ok: true });
+        });
+        child.once("error", (error) => settle({ error: error as NodeJS.ErrnoException, ok: false }));
+      } catch (error) {
+        settle({ error: error as NodeJS.ErrnoException, ok: false });
+      }
+    });
+
+    if (result.ok) {
+      return { command, ok: true };
+    }
+
+    lastError = result.error;
+  }
+
+  return { error: lastError, ok: false };
+}
+
 export function buildShortcutLine(selected: ManagedServiceState | null, hasLogs = false): string {
   const shortcuts = ["[↑/↓ j/k] Move"];
 
@@ -600,7 +823,7 @@ export function buildShortcutLine(selected: ManagedServiceState | null, hasLogs 
   }
 
   if (selected) {
-    shortcuts.push("[e] Editor");
+    shortcuts.push("[e] Editor", "[t] Terminal");
   }
 
   shortcuts.push("[v] View logs", "[q] Quit");
@@ -1124,6 +1347,28 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       void render();
     };
 
+    const openTerminalForSelectedService = async () => {
+      const service = getSelectedService();
+      if (!service) {
+        setFooterMessage("warning", "No service selected.");
+        void render();
+        return;
+      }
+
+      const result = await launchTerminal(buildTerminalLaunchCommands(service.cwd));
+      if (!result.ok) {
+        setFooterMessage(
+          "error",
+          `Unable to open terminal for ${service.service}: ${result.error ? getErrorMessage(result.error) : "no terminal command available"}`,
+        );
+        void render();
+        return;
+      }
+
+      setFooterMessage("info", `Opening terminal for ${service.service} in ${service.cwd}.`);
+      void render();
+    };
+
     const scrollLogs = (offset: number) => {
       logBox.scroll(offset);
       logPinnedToBottom = logBox.getScrollPerc() >= 98;
@@ -1396,6 +1641,11 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       setFooterMessage("info", `Opening ${service.cwd} in ${editor}…`);
       renderFooter();
       screen.render();
+    });
+    screen.key(["t"], () => {
+      if (mode === "navigate") {
+        void openTerminalForSelectedService();
+      }
     });
     screen.key(["enter"], () => {
       if (mode === "branchPrompt") {

@@ -615,9 +615,11 @@ test("buildShortcutLine shows restart and clear logs only when available", async
 
   assert.match(buildShortcutLine(runningSelected, true), /\[r\] Restart/);
   assert.match(buildShortcutLine(runningSelected, true), /\[c\] Clear logs/);
+  assert.match(buildShortcutLine(runningSelected, true), /\[t\] Terminal/);
   assert.doesNotMatch(buildShortcutLine(runningSelected, true), /\[p\] Pull/);
   assert.doesNotMatch(buildShortcutLine(runningSelected, true), /\[d\] Branch/);
   assert.doesNotMatch(buildShortcutLine(runningSelected, false), /\[c\] Clear logs/);
+  assert.doesNotMatch(buildShortcutLine(null, false), /\[t\] Terminal/);
   assert.doesNotMatch(buildShortcutLine(stoppedSelected, true), /\[r\] Restart/);
   assert.match(buildShortcutLine(stoppedSelected, true), /\[p\] Pull/);
   assert.match(buildShortcutLine(stoppedSelected, true), /\[d\] Branch/);
@@ -678,6 +680,57 @@ test("buildShortcutLine shows restart and clear logs only when available", async
   assert.match(headerContent, /CPU 23%/u);
   assert.match(headerContent, /RAM 5\.2GB/u);
   assert.match(headerContent, /…\s{2}$/u);
+});
+
+test("buildTerminalLaunchCommands prioritizes the current terminal and service cwd", async () => {
+  const { buildTerminalLaunchCommands } = await import(path.join(projectRoot, "dist/lib.js"));
+  const cwd = "/tmp/my service/quote'path";
+
+  const alacrittyDarwin = buildTerminalLaunchCommands(cwd, {
+    env: { __CFBundleIdentifier: "org.alacritty" },
+    platform: "darwin",
+  });
+  assert.equal(alacrittyDarwin[0].label, "Alacritty");
+  assert.equal(alacrittyDarwin[0].command, "open");
+  assert.deepEqual(alacrittyDarwin[0].args, ["-na", "Alacritty", "--args", "--working-directory", cwd]);
+  assert.equal(alacrittyDarwin[0].cwd, cwd);
+
+  const itermDarwin = buildTerminalLaunchCommands(cwd, {
+    env: { TERM_PROGRAM: "iTerm.app" },
+    platform: "darwin",
+  });
+  assert.equal(itermDarwin[0].label, "iTerm");
+  assert.equal(itermDarwin[0].command, "osascript");
+  assert.match(itermDarwin[0].args[1], /create window with default profile/);
+  assert.ok(itermDarwin[0].args[1].includes(`write text "cd '/tmp/my service/quote'\\\\''path'"`));
+
+  const terminalFallback = buildTerminalLaunchCommands(cwd, {
+    env: {},
+    platform: "darwin",
+  });
+  assert.equal(terminalFallback[0].label, "Terminal");
+  assert.match(terminalFallback[0].args[1], /tell application "Terminal"/);
+
+  const linuxKitty = buildTerminalLaunchCommands(cwd, {
+    env: { TERM: "xterm-kitty" },
+    platform: "linux",
+  });
+  assert.equal(linuxKitty[0].label, "Kitty");
+  assert.deepEqual(linuxKitty[0].args, ["--directory", cwd]);
+
+  const linuxFallback = buildTerminalLaunchCommands(cwd, {
+    env: {},
+    platform: "linux",
+  });
+  assert.equal(linuxFallback[0].command, "x-terminal-emulator");
+  assert.equal(linuxFallback[0].cwd, cwd);
+
+  const windowsTerminal = buildTerminalLaunchCommands("C:\\Users\\Dev User\\api", {
+    env: { WT_SESSION: "1" },
+    platform: "win32",
+  });
+  assert.equal(windowsTerminal[0].label, "Windows Terminal");
+  assert.deepEqual(windowsTerminal[0].args, ["-w", "new", "-d", "C:\\Users\\Dev User\\api"]);
 });
 
 test("buildLogViewerCommand uses the native terminal viewer script", async () => {
