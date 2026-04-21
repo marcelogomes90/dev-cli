@@ -10,7 +10,9 @@ It starts services through a detached supervisor process, keeps live state on di
 - Expands service dependencies during the initial startup plan.
 - Keeps a long-lived supervisor process per project so commands share the same runtime state.
 - Opens a terminal UI to start, stop, restart, install, inspect, and manage services individually.
+- Shows live CPU/RAM metrics and git branch information when a service directory is a git repository.
 - Stores per-service logs and opens them in the native terminal viewer from the UI.
+- Opens a service directory in your editor or in a new terminal window from the UI.
 
 ## Requirements
 
@@ -67,6 +69,8 @@ hooks:
     - echo "Workspace requested"
   beforeDown: echo "Stopping workspace"
 
+editor: code
+
 groups:
   infra:
     services: [redis]
@@ -98,6 +102,7 @@ services:
 - `hooks.beforeUp`: command or list of commands executed before `up`.
 - `hooks.afterUp`: command or list of commands executed after `up`.
 - `hooks.beforeDown`: command or list of commands executed before `down`.
+- `editor`: optional editor command used by the UI editor action. Defaults to `code`.
 - `groups`: named collections of services. These names can be used with `--only`.
 
 #### Service fields
@@ -112,12 +117,19 @@ services:
 
 ### Notes
 
+- Config files are discovered only in the current workspace root as `.devrc.yml` or `.devrc.yaml`.
+- `project` in the config must match the `<project>` argument passed to the CLI.
+- Relative `cwd` values are resolved from the directory that contains the config file.
+- `~/` and absolute `cwd` values are supported.
+- Every service must belong to an existing group and must be listed in that group's `services` array.
 - `dependsOn` is only used during `dev up`.
 - `dev up` starts services in dependency phases.
 - After one dependency phase is started, the next dependent phase waits 5 seconds before starting.
 - Services in the same dependency phase start together after that shared delay.
 - `--only` accepts group names or service names.
 - Group `layout` metadata is parsed if present in the config, but the built-in UI does not currently depend on it.
+- Hooks run in the workspace root using the current shell environment.
+- Service commands and install commands run through the current shell from each service `cwd`.
 
 ## Commands
 
@@ -191,6 +203,8 @@ Behavior:
 
 The built-in UI lets you manage services individually after the supervisor is running.
 
+The header shows the project name, running service count, and live CPU/RAM usage. The service list shows the current git branch for service directories that are git repositories.
+
 ### Navigation
 
 - `↑/↓` or `j/k`: move between services
@@ -206,6 +220,8 @@ The built-in UI lets you manage services individually after the supervisor is ru
 - `r`: restart the selected running service
 - `c`: clear logs for the selected service when logs exist
 - `v`: open the full service log in the native terminal viewer
+- `e`: open the selected service directory in the configured editor
+- `t`: open the selected service directory in a new terminal window
 
 ### Git actions
 
@@ -228,6 +244,16 @@ Common flow:
 3. Use the UI to inspect logs and control individual services.
 4. Use `dev status <project>` when you want a quick non-interactive snapshot.
 5. Run `dev down <project>` to stop everything cleanly.
+
+## Development
+
+```bash
+yarn install
+yarn build
+yarn test
+```
+
+`yarn test` builds the CLI and runs the Node test suite in `test/*.test.mjs`.
 
 ## Project Scope
 
