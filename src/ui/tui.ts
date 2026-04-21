@@ -143,13 +143,12 @@ try {
 }
 
 if (!stdin.isTTY || !stdout.isTTY) {
-  stdout.write(content);
+  process.stdout.write(content);
   process.exit(0);
 }
 
 const lines = content.replace(/\r\n/g, "\n").split("\n");
 let cleanedUp = false;
-let pagerMode = false;
 let top = 0;
 
 function terminalRows() {
@@ -172,14 +171,13 @@ function render() {
     stdout.write((lines[top + i] ?? "") + "\x1b[K");
     if (i < r - 1) stdout.write("\n");
   }
-  stdout.write("\x1b[" + (r + 1) + ";1H\x1b[2m--- press v to return ---\x1b[0m\x1b[K");
+  stdout.write("\x1b[" + (r + 1) + ";1H\x1b[2m--- press v or q to return ---\x1b[0m\x1b[K");
 }
 
-function enterPagerMode(offset) {
-  pagerMode = true;
-  stdout.write("\x1b[?1049h\x1b[?1007h\x1b[?25l");
+function enterPager() {
+  stdout.write("\x1b[?1049h\x1b[?1007h\x1b[?25l\x1b[2J\x1b[H");
   stdout.on("resize", render);
-  top = Math.max(0, Math.min(maxTop() + offset, maxTop()));
+  top = maxTop();
   render();
 }
 
@@ -188,31 +186,15 @@ function scrollPager(offset) {
   render();
 }
 
-function scrollOrEnterPager(offset) {
-  if (!pagerMode) {
-    enterPagerMode(offset);
-    return;
-  }
-
-  scrollPager(offset);
-}
-
-function clearVisibleScreenPreservingScrollback() {
-  stdout.write("\n".repeat(terminalRows()));
-  stdout.write("\x1b[2J\x1b[H");
-}
-
 function cleanup() {
   if (cleanedUp) {
     return;
   }
 
   cleanedUp = true;
-  if (pagerMode) {
-    stdout.write("\x1b[?1007l\x1b[?1049l");
-  }
-  clearVisibleScreenPreservingScrollback();
-  stdout.write("\x1b[?25h\x1b[0m");
+  stdout.off("resize", render);
+  stdout.write("\x1b[?1007l\x1b[?25h\x1b[0m\x1b[2J\x1b[H\x1b[?1049l");
+  stdin.setRawMode(false);
 }
 
 function finish() {
@@ -222,46 +204,58 @@ function finish() {
 
 process.on("exit", cleanup);
 
-stdout.write("\x1b[?25l\x1b[0m");
-clearVisibleScreenPreservingScrollback();
-stdout.write(content);
-if (content.length > 0 && !content.endsWith("\n")) {
-  stdout.write("\n");
-}
-stdout.write("\x1b[2m--- press v to return ---\x1b[0m");
-
 stdin.setRawMode(true);
 stdin.resume();
+enterPager();
 stdin.on("data", (chunk) => {
   const input = chunk.toString("utf8");
   let i = 0;
   while (i < input.length) {
     const rest = input.slice(i);
     if (rest.startsWith("\x1b[A") || rest.startsWith("\x1bOA")) {
-      scrollOrEnterPager(-1);
+      scrollPager(-1);
       i += 3; continue;
     }
     if (rest.startsWith("\x1b[B") || rest.startsWith("\x1bOB")) {
-      scrollOrEnterPager(1);
+      scrollPager(1);
       i += 3; continue;
     }
     if (rest.startsWith("\x1b[5~")) {
-      scrollOrEnterPager(-rows());
+      scrollPager(-rows());
       i += 4; continue;
     }
     if (rest.startsWith("\x1b[6~")) {
-      scrollOrEnterPager(rows());
+      scrollPager(rows());
       i += 4; continue;
     }
-    if (rest.startsWith("\x1b[1~") || rest.startsWith("\x1bOH")) {
-      if (!pagerMode) enterPagerMode(-maxTop());
-      else { top = 0; render(); }
-      i += rest.startsWith("\x1b[1~") ? 4 : 3; continue;
+    if (rest.startsWith("\x1b[1~")) {
+      top = 0; render();
+      i += 4; continue;
     }
-    if (rest.startsWith("\x1b[4~") || rest.startsWith("\x1bOF")) {
-      if (!pagerMode) enterPagerMode(0);
-      else { top = maxTop(); render(); }
-      i += rest.startsWith("\x1b[4~") ? 4 : 3; continue;
+    if (rest.startsWith("\x1b[4~")) {
+      top = maxTop(); render();
+      i += 4; continue;
+    }
+    if (rest.startsWith("\x1bOH") || rest.startsWith("\x1b[H")) {
+      top = 0; render();
+      i += 3; continue;
+    }
+    if (rest.startsWith("\x1bOF") || rest.startsWith("\x1b[F")) {
+      top = maxTop(); render();
+      i += 3; continue;
+    }
+    const sgrMouse = rest.match(/^\x1b\[<(\d+);\d+;\d+[mM]/);
+    if (sgrMouse) {
+      const button = Number(sgrMouse[1]);
+      if (button === 64) scrollPager(-3);
+      if (button === 65) scrollPager(3);
+      i += sgrMouse[0].length; continue;
+    }
+    if (rest.startsWith("\x1b[M") && rest.length >= 6) {
+      const button = rest.charCodeAt(3) - 32;
+      if (button === 64) scrollPager(-3);
+      if (button === 65) scrollPager(3);
+      i += 6; continue;
     }
     if (rest[0] === "\x1b") {
       i += 1; continue;
@@ -271,7 +265,6 @@ stdin.on("data", (chunk) => {
     i += 1;
   }
 });
-if (pagerMode) stdout.on("resize", render);
 `;
 const execFileAsync = promisify(execFile);
 

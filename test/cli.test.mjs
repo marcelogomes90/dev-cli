@@ -751,23 +751,28 @@ test("buildTerminalLaunchCommands prioritizes the current terminal and service c
 test("buildLogViewerCommand uses the native terminal viewer script", async () => {
   const { buildLogViewerCommand } = await import(path.join(projectRoot, "dist/lib.js"));
   const command = buildLogViewerCommand("/tmp/api.log");
+  const script = command.args[1];
 
   assert.equal(command.command, process.execPath);
   assert.equal(command.args[0], "--eval");
   assert.equal(command.args[2], "/tmp/api.log");
-  assert.match(command.args[1], /press v to return/);
-  assert.match(command.args[1], /input\[i\] === "v"/);
-  assert.match(command.args[1], /\\x1b\[A/);
-  assert.match(command.args[1], /\\x1b\[B/);
-  assert.match(command.args[1], /\\x1b\[\?1049h/);
-  assert.match(command.args[1], /\\x1b\[\?1007h/);
-  assert.match(command.args[1], /clearVisibleScreenPreservingScrollback/);
-  assert.match(command.args[1], /"\\n"\.repeat\(terminalRows\(\)\)/);
-  assert.match(command.args[1], /stdout\.write\(content\)/);
-  assert.match(command.args[1], /pagerMode/);
-  assert.doesNotMatch(command.args[1], /\\x1b\[\?1000h/);
-  assert.doesNotMatch(command.args[1], /\\x1b\[\?1006h/);
-  assert.doesNotMatch(command.args[1], /\\x1b\[3J/);
+  assert.match(script, /press v or q to return/);
+  assert.match(script, /input\[i\] === "v" \|\| input\[i\] === "q"/);
+  assert.match(script, /\\x1b\[A/);
+  assert.match(script, /\\x1b\[B/);
+  assert.match(script, /\\x1b\[5~/);
+  assert.match(script, /\\x1b\[6~/);
+  assert.match(script, /\\x1bOH/);
+  assert.match(script, /\\x1bOF/);
+  assert.match(script, /\\x1b\[\?1049h/);
+  assert.match(script, /\\x1b\[\?1007h/);
+  assert.ok(script.indexOf("\\x1b[?1049h") < script.indexOf("render();"));
+  assert.doesNotMatch(script, /clearVisibleScreenPreservingScrollback/);
+  assert.doesNotMatch(script, /^\s*stdout\.write\(content\)/m);
+  assert.doesNotMatch(script, /pagerMode/);
+  assert.doesNotMatch(script, /\\x1b\[\?1000h/);
+  assert.doesNotMatch(script, /\\x1b\[\?1006h/);
+  assert.doesNotMatch(script, /\\x1b\[3J/);
 });
 
 test("launchExternalLogViewer suspends and restores the screen around the viewer process", async () => {
