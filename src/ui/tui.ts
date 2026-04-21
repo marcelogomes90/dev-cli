@@ -79,7 +79,6 @@ interface LogViewerProgram {
     resume(): void;
     setRawMode?: (mode: boolean) => void;
   };
-  resetMode(...args: string[]): boolean;
 }
 
 interface LogViewerScreen {
@@ -129,142 +128,130 @@ if (!stdin.isTTY || !stdout.isTTY) {
 }
 
 const lines = content.replace(/\r\n/g, "\n").split("\n");
+let cleanedUp = false;
+let pagerMode = false;
 let top = 0;
-let pasteMode = false;
 
-function visibleRows() {
-  return Math.max(1, (stdout.rows || 24) - 1);
+function terminalRows() {
+  return Math.max(1, stdout.rows || 24);
+}
+
+function rows() {
+  return Math.max(1, terminalRows() - 1);
 }
 
 function maxTop() {
-  return Math.max(0, lines.length - visibleRows());
-}
-
-function clampTop() {
-  top = Math.max(0, Math.min(top, maxTop()));
+  return Math.max(0, lines.length - rows());
 }
 
 function render() {
-  clampTop();
-  const rows = visibleRows();
-  stdout.write("\x1b[?25l\x1b[?7l\x1b[2J\x1b[H");
-
-  for (let index = 0; index < rows; index += 1) {
-    stdout.write(lines[top + index] ?? "");
-    stdout.write("\x1b[K");
-    if (index < rows - 1) {
-      stdout.write("\n");
-    }
+  top = Math.max(0, Math.min(top, maxTop()));
+  const r = rows();
+  stdout.write("\x1b[H");
+  for (let i = 0; i < r; i++) {
+    stdout.write((lines[top + i] ?? "") + "\x1b[K");
+    if (i < r - 1) stdout.write("\n");
   }
-
-  stdout.write("\x1b[" + (rows + 1) + ";1H\x1b[2m--- arrows/page scroll, press v to return ---\x1b[0m\x1b[K");
+  stdout.write("\x1b[" + (r + 1) + ";1H\x1b[2m--- press v to return ---\x1b[0m\x1b[K");
 }
 
-function finish() {
-  stdout.write("\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[0m");
-  process.exit(0);
-}
-
-function scroll(offset) {
-  top += offset;
+function enterPagerMode(offset) {
+  pagerMode = true;
+  stdout.write("\x1b[?1049h\x1b[?1007h\x1b[?25l");
+  stdout.on("resize", render);
+  top = Math.max(0, Math.min(maxTop() + offset, maxTop()));
   render();
 }
 
-function handleSequence(sequence) {
-  switch (sequence) {
-    case "\x1b[A":
-    case "\x1bOA":
-      scroll(-1);
-      return true;
-    case "\x1b[B":
-    case "\x1bOB":
-      scroll(1);
-      return true;
-    case "\x1b[5~":
-      scroll(-visibleRows());
-      return true;
-    case "\x1b[6~":
-      scroll(visibleRows());
-      return true;
-    case "\x1b[H":
-    case "\x1b[1~":
-    case "\x1bOH":
-      top = 0;
-      render();
-      return true;
-    case "\x1b[F":
-    case "\x1b[4~":
-    case "\x1bOF":
-      top = maxTop();
-      render();
-      return true;
-    default:
-      return false;
-  }
+function scrollPager(offset) {
+  top = Math.max(0, Math.min(top + offset, maxTop()));
+  render();
 }
 
-function handleInput(chunk) {
-  const input = chunk.toString("utf8");
-  let index = 0;
-
-  while (index < input.length) {
-    if (pasteMode) {
-      const end = input.indexOf("\x1b[201~", index);
-      if (end === -1) {
-        return;
-      }
-
-      pasteMode = false;
-      index = end + "\x1b[201~".length;
-      continue;
-    }
-
-    if (input.startsWith("\x1b[200~", index)) {
-      pasteMode = true;
-      index += "\x1b[200~".length;
-      continue;
-    }
-
-    const candidates = [
-      "\x1b[5~",
-      "\x1b[6~",
-      "\x1b[1~",
-      "\x1b[4~",
-      "\x1b[A",
-      "\x1b[B",
-      "\x1b[H",
-      "\x1b[F",
-      "\x1bOA",
-      "\x1bOB",
-      "\x1bOH",
-      "\x1bOF",
-    ];
-    const sequence = candidates.find((candidate) => input.startsWith(candidate, index));
-    if (sequence) {
-      handleSequence(sequence);
-      index += sequence.length;
-      continue;
-    }
-
-    if (input[index] === "v") {
-      finish();
-    }
-
-    index += 1;
+function scrollOrEnterPager(offset) {
+  if (!pagerMode) {
+    enterPagerMode(offset);
+    return;
   }
+
+  scrollPager(offset);
 }
+
+function clearVisibleScreenPreservingScrollback() {
+  stdout.write("\n".repeat(terminalRows()));
+  stdout.write("\x1b[2J\x1b[H");
+}
+
+function cleanup() {
+  if (cleanedUp) {
+    return;
+  }
+
+  cleanedUp = true;
+  if (pagerMode) {
+    stdout.write("\x1b[?1007l\x1b[?1049l");
+  }
+  clearVisibleScreenPreservingScrollback();
+  stdout.write("\x1b[?25h\x1b[0m");
+}
+
+function finish() {
+  cleanup();
+  process.exit(0);
+}
+
+process.on("exit", cleanup);
+
+stdout.write("\x1b[?25l\x1b[0m");
+clearVisibleScreenPreservingScrollback();
+stdout.write(content);
+if (content.length > 0 && !content.endsWith("\n")) {
+  stdout.write("\n");
+}
+stdout.write("\x1b[2m--- press v to return ---\x1b[0m");
 
 stdin.setRawMode(true);
 stdin.resume();
-stdin.on("data", handleInput);
-stdout.on("resize", render);
-process.on("exit", () => {
-  stdout.write("\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[0m");
+stdin.on("data", (chunk) => {
+  const input = chunk.toString("utf8");
+  let i = 0;
+  while (i < input.length) {
+    const rest = input.slice(i);
+    if (rest.startsWith("\x1b[A") || rest.startsWith("\x1bOA")) {
+      scrollOrEnterPager(-1);
+      i += 3; continue;
+    }
+    if (rest.startsWith("\x1b[B") || rest.startsWith("\x1bOB")) {
+      scrollOrEnterPager(1);
+      i += 3; continue;
+    }
+    if (rest.startsWith("\x1b[5~")) {
+      scrollOrEnterPager(-rows());
+      i += 4; continue;
+    }
+    if (rest.startsWith("\x1b[6~")) {
+      scrollOrEnterPager(rows());
+      i += 4; continue;
+    }
+    if (rest.startsWith("\x1b[1~") || rest.startsWith("\x1bOH")) {
+      if (!pagerMode) enterPagerMode(-maxTop());
+      else { top = 0; render(); }
+      i += rest.startsWith("\x1b[1~") ? 4 : 3; continue;
+    }
+    if (rest.startsWith("\x1b[4~") || rest.startsWith("\x1bOF")) {
+      if (!pagerMode) enterPagerMode(0);
+      else { top = maxTop(); render(); }
+      i += rest.startsWith("\x1b[4~") ? 4 : 3; continue;
+    }
+    if (rest[0] === "\x1b") {
+      i += 1; continue;
+    }
+    if (input[i] === "v" || input[i] === "q") finish();
+    if (input[i] === "\x03") finish();
+    i += 1;
+  }
 });
-
-stdout.write("\x1b[?2004h");
-top = maxTop();
-render();
+if (pagerMode) stdout.on("resize", render);
 `;
 const execFileAsync = promisify(execFile);
 
@@ -865,7 +852,6 @@ export function launchExternalLogViewer(
   program.input.pause();
   screen.leave?.();
   program.disableMouse();
-  program.resetMode("?1007");
 
   try {
     return spawnSyncImpl(viewerCommand.command, viewerCommand.args, { stdio: "inherit" });

@@ -751,13 +751,18 @@ test("buildLogViewerCommand uses the native terminal viewer script", async () =>
   assert.equal(command.args[0], "--eval");
   assert.equal(command.args[2], "/tmp/api.log");
   assert.match(command.args[1], /press v to return/);
-  assert.match(command.args[1], /case "\\x1b\[A"/);
-  assert.match(command.args[1], /case "\\x1b\[B"/);
-  assert.match(command.args[1], /case "\\x1b\[5~"/);
-  assert.match(command.args[1], /case "\\x1b\[6~"/);
-  assert.match(command.args[1], /input\.startsWith\("\\x1b\[200~"/);
-  assert.match(command.args[1], /input\[index\] === "v"/);
-  assert.doesNotMatch(command.args[1], /press any key to return/);
+  assert.match(command.args[1], /input\[i\] === "v"/);
+  assert.match(command.args[1], /\\x1b\[A/);
+  assert.match(command.args[1], /\\x1b\[B/);
+  assert.match(command.args[1], /\\x1b\[\?1049h/);
+  assert.match(command.args[1], /\\x1b\[\?1007h/);
+  assert.match(command.args[1], /clearVisibleScreenPreservingScrollback/);
+  assert.match(command.args[1], /"\\n"\.repeat\(terminalRows\(\)\)/);
+  assert.match(command.args[1], /stdout\.write\(content\)/);
+  assert.match(command.args[1], /pagerMode/);
+  assert.doesNotMatch(command.args[1], /\\x1b\[\?1000h/);
+  assert.doesNotMatch(command.args[1], /\\x1b\[\?1006h/);
+  assert.doesNotMatch(command.args[1], /\\x1b\[3J/);
 });
 
 test("launchExternalLogViewer suspends and restores the screen around the viewer process", async () => {
@@ -791,10 +796,6 @@ test("launchExternalLogViewer suspends and restores the screen around the viewer
         setRawMode: (mode) => {
           events.push(`input.raw:${mode}`);
         },
-      },
-      resetMode: (...args) => {
-        events.push(`resetMode:${args.join(",")}`);
-        return true;
       },
     },
     render: () => {
@@ -830,7 +831,6 @@ test("launchExternalLogViewer suspends and restores the screen around the viewer
     "input.pause",
     "leave",
     "disableMouse",
-    "resetMode:?1007",
     "spawn",
     "input.raw:true",
     "input.resume",
