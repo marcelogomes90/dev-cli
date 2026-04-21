@@ -6,7 +6,6 @@ const SUPERVISOR_ROOT = path.join(os.tmpdir(), "dev-cli-supervisor");
 
 export interface SupervisorPaths {
   baseDir: string;
-  lockPath: string;
   logsDir: string;
   socketPath: string;
   statePath: string;
@@ -18,7 +17,6 @@ export function getSupervisorPaths(project: string): SupervisorPaths {
 
   return {
     baseDir,
-    lockPath: path.join(baseDir, "supervisor.lock"),
     logsDir: path.join(baseDir, "logs"),
     socketPath: path.join(baseDir, "supervisor.sock"),
     statePath: path.join(baseDir, "state.json"),

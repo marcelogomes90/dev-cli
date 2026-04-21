@@ -1,5 +1,4 @@
 import net from "node:net";
-import path from "node:path";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { appendFile, rm, writeFile } from "node:fs/promises";
 import type { Readable } from "node:stream";
@@ -13,6 +12,9 @@ import {
 } from "../../utils/process";
 import { buildSupervisorPlan, DEPENDENCY_START_DELAY_MS, resolveTargets, type SupervisorPlan } from "./plan";
 import { clearSupervisorFiles, ensureSupervisorDirs, getSupervisorPaths } from "./paths";
+import { sanitizeLogChunk } from "./log-sanitizer";
+import { buildShellSpawn, resolveRuntimeShell } from "./runtime";
+import { createServiceState } from "./service-state";
 import { loadSupervisorState, saveSupervisorState } from "./state";
 import type {
   ManagedServiceState,
@@ -34,103 +36,12 @@ interface ManagedServiceContext {
   serviceName: string;
 }
 
-const ANSI_REGEX = /\x1b\[[0-9;]*m/g;
-const ANSI_CONTROL_REGEX = /\x1b\[[0-9;]*[ABCDEFGHJKSTfsu]/g;
 const BRANCH_REFRESH_INTERVAL_MS = 10_000;
 const DEFAULT_STOP_TIMEOUT_MS = 3_000;
 const DEFAULT_KILL_TIMEOUT_MS = 2_000;
-const LOG_NOISE_PATTERNS = [
-  /^gitstatus failed to initialize$/i,
-  /^\[ERROR\]: gitstatus failed to initialize\.$/i,
-  /^setopt: can't change option: monitor$/i,
-  /^setopt: can't change option: zle$/i,
-  /^\(anon\):setopt:\d+: can't change option: monitor$/i,
-  /^\(eval\):\d+: can't change option: zle$/i,
-  /^\[oh-my-zsh\] Insecure completion-dependent directories detected:/i,
-  /^compaudit \| xargs chmod g-w,o-w$/i,
-  /^There are insecure directories:/i,
-  /^Add the following parameter to .* for extra diagnostics on error:/i,
-  /^Restart .* to retry gitstatus initialization:/i,
-  /^exec zsh$/i,
-  /^GITSTATUS_LOG_LEVEL=DEBUG$/i,
-  /^\(node:\d+\) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set\.$/i,
-  /^\(Use `node --trace-warnings .*` to show where the warning was created\)$/i,
-];
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function createServiceState(
-  project: string,
-  group: string,
-  service: ProjectConfig["services"][string],
-): ManagedServiceState {
-  const paths = getSupervisorPaths(project);
-
-  return {
-    branch: "-",
-    command: service.command,
-    cwd: service.cwd,
-    exitCode: null,
-    group,
-    installCommand: service.installCommand,
-    isGit: false,
-    lastStartedAt: null,
-    lastStoppedAt: null,
-    logPath: path.join(paths.logsDir, `${service.name}.log`),
-    pid: null,
-    service: service.name,
-    status: "stopped",
-  };
-}
-
-function stripAnsi(value: string): string {
-  return value.replace(ANSI_REGEX, "");
-}
-
-function shouldDropLogLine(line: string): boolean {
-  const normalized = stripAnsi(line).trim();
-  if (!normalized) {
-    return false;
-  }
-
-  return LOG_NOISE_PATTERNS.some((pattern) => pattern.test(normalized));
-}
-
-function sanitizeLogChunk(chunk: string): string {
-  const normalized = chunk
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/\u0004\b\b/g, "")
-    .replace(ANSI_CONTROL_REGEX, "");
-
-  const parts = normalized.split("\n");
-  const sanitized = parts.filter((line) => !shouldDropLogLine(line)).join("\n");
-
-  if (!sanitized) {
-    return "";
-  }
-
-  if (normalized.endsWith("\n") && !sanitized.endsWith("\n")) {
-    return `${sanitized}\n`;
-  }
-
-  return sanitized;
-}
-
-function buildShellSpawn(
-  shell: string,
-  command: string,
-): { args: string[]; command: string } {
-  return {
-    command: shell,
-    args: [process.platform === "win32" ? "-lc" : "-ic", command],
-  };
-}
-
-function resolveRuntimeShell(): string {
-  return process.env.SHELL || "/bin/sh";
 }
 
 export class SupervisorDaemon {
