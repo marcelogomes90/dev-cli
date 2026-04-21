@@ -624,10 +624,14 @@ test("buildShortcutLine shows restart and clear logs only when available", async
   assert.match(buildShortcutLine(stoppedSelected, true), /\[p\] Pull/);
   assert.match(buildShortcutLine(stoppedSelected, true), /\[d\] Branch/);
 
-  const layout = getSupervisorPaneLayout(100);
-  assert.equal(layout.servicesWidth, 44);
-  assert.equal(layout.logLeft, 44);
-  assert.equal(layout.logWidth, 56);
+  const layout = getSupervisorPaneLayout(100, 36);
+  assert.equal(layout.servicesWidth, 100);
+  assert.equal(layout.servicesTop, 4);
+  assert.equal(layout.servicesHeight, 10);
+  assert.equal(layout.logLeft, 0);
+  assert.equal(layout.logTop, 14);
+  assert.equal(layout.logWidth, 100);
+  assert.equal(layout.logHeight, 18);
 
   assert.equal(
     formatResourceMetrics({
@@ -672,14 +676,15 @@ test("buildShortcutLine shows restart and clear logs only when available", async
   );
   const headerContent = buildHeaderContent(
     "amigo",
-    "Running 1/2 services",
+    "1/2 running",
     "CPU 23%  RAM 5.2GB/10.8GB",
     48,
   );
-  assert.match(headerContent, /^\s+\{bold\}amigo\{\/bold\}\n\s{2}Running 1\/2 services/u);
+  assert.match(headerContent, /^\s{2}\{bold\}amigo\{\/bold\}/u);
+  assert.match(headerContent, /\{cyan-fg\}1\/2 running/u);
+  assert.match(headerContent, /\{green-fg\}live/u);
   assert.match(headerContent, /CPU 23%/u);
   assert.match(headerContent, /RAM 5\.2GB/u);
-  assert.match(headerContent, /…\s{2}$/u);
 });
 
 test("buildTerminalLaunchCommands prioritizes the current terminal and service cwd", async () => {

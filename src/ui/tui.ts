@@ -23,6 +23,8 @@ interface FooterMessage {
 
 interface ServiceRenderResult {
   content: string;
+  failedCount: number;
+  headerContent: string;
   runningCount: number;
   serviceNames: string[];
   selectedLine: number;
@@ -37,8 +39,13 @@ interface LogCache {
 }
 
 export interface SupervisorPaneLayout {
+  bodyHeight: number;
+  logHeight: number;
   logLeft: number;
+  logTop: number;
   logWidth: number;
+  servicesHeight: number;
+  servicesTop: number;
   servicesWidth: number;
 }
 
@@ -105,9 +112,22 @@ const LOG_TAIL_LINES = 320;
 const LOG_TAIL_READ_BYTES = 192 * 1024;
 const MAX_INCREMENTAL_READ_BYTES = 128 * 1024;
 const HEADER_HEIGHT = 4;
+const SERVICES_MIN_HEIGHT = 6;
+const SERVICES_MAX_HEIGHT = 12;
 const METRICS_REFRESH_MS = 1_000;
 const SCREEN_POLL_MS = 250;
 const FOOTER_HEIGHT = 4;
+const UI_THEME = {
+  accent: "cyan",
+  border: "gray",
+  danger: "red",
+  logAccent: "magenta",
+  muted: "gray",
+  steady: "green",
+  tableHeader: "yellow",
+  text: "white",
+  warning: "yellow",
+} as const;
 const LOG_VIEWER_SCRIPT = String.raw`
 const fs = require("node:fs");
 
@@ -255,6 +275,18 @@ if (pagerMode) stdout.on("resize", render);
 `;
 const execFileAsync = promisify(execFile);
 
+function fg(color: string, value: string): string {
+  return `{${color}-fg}${value}{/${color}-fg}`;
+}
+
+function muted(value: string): string {
+  return fg(UI_THEME.muted, value);
+}
+
+function bold(value: string): string {
+  return `{bold}${value}{/bold}`;
+}
+
 function truncate(value: string, max: number): string {
   if (value.length <= max) {
     return value.padEnd(max, " ");
@@ -284,59 +316,172 @@ function toneTag(tone: MessageTone): string {
 function colorStatus(status: ManagedServiceState["status"], value: string): string {
   switch (status) {
     case "running":
-      return `{green-fg}${value}{/green-fg}`;
+      return fg(UI_THEME.steady, value);
     case "installing":
     case "restarting":
     case "starting":
     case "stopping":
-      return `{yellow-fg}${value}{/yellow-fg}`;
+      return fg(UI_THEME.warning, value);
     case "failed":
+      return fg(UI_THEME.danger, value);
     case "stopped":
-      return `{red-fg}${value}{/red-fg}`;
+      return muted(value);
     default:
       return value;
   }
 }
 
-export function getSupervisorPaneLayout(screenWidth: number): SupervisorPaneLayout {
+function statusDot(status: ManagedServiceState["status"]): string {
+  switch (status) {
+    case "running":
+      return "●";
+    case "failed":
+      return "!";
+    case "stopped":
+      return "○";
+    default:
+      return "●";
+  }
+}
+
+function formatStatus(status: ManagedServiceState["status"], width: number): string {
+  return colorStatus(status, truncate(`${statusDot(status)} ${status.toUpperCase()}`, width));
+}
+
+function formatCompactBytes(value: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let current = Math.max(value, 0);
+  let unitIndex = 0;
+
+  while (current >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024;
+    unitIndex += 1;
+  }
+
+  const precision = unitIndex === 0 ? 0 : current >= 10 ? 0 : 1;
+  return `${current.toFixed(precision)}${units[unitIndex]}`;
+}
+
+function formatRelativeAge(value: string | null, now = Date.now()): string {
+  if (!value) {
+    return "--";
+  }
+
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    return "--";
+  }
+
+  const seconds = Math.max(Math.floor((now - parsed) / 1000), 0);
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) {
+    return `${hours}h`;
+  }
+
+  return `${Math.floor(hours / 24)}d`;
+}
+
+function getServiceAgeLabel(service: ManagedServiceState, now: number): string {
+  if (service.status !== "running") {
+    return "--";
+  }
+
+  return `up ${formatRelativeAge(service.lastStartedAt, now)}`;
+}
+
+function formatServicePid(service: ManagedServiceState, width: number): string {
+  return truncate(service.pid ? String(service.pid) : "-", width);
+}
+
+function formatServiceUptime(service: ManagedServiceState, width: number, now: number): string {
+  return truncate(getServiceAgeLabel(service, now), width);
+}
+
+function formatServiceLogSize(logSize: number | undefined, width: number): string {
+  return truncate(logSize === undefined ? "--" : formatCompactBytes(logSize), width);
+}
+
+export function getSupervisorPaneLayout(screenWidth: number, screenHeight = 32): SupervisorPaneLayout {
   const width = Math.max(Math.floor(screenWidth), 40);
-  const servicesWidth = Math.min(
-    Math.max(Math.floor(width * 0.44), 40),
-    Math.max(width - 24, 20),
+  const height = Math.max(Math.floor(screenHeight), HEADER_HEIGHT + FOOTER_HEIGHT + 2);
+  const bodyHeight = getBodyHeight(height);
+  const logMinimumHeight = bodyHeight >= 10 ? 5 : 1;
+  const preferredServicesHeight = Math.round(bodyHeight * 0.34);
+  const servicesHeight = Math.min(
+    Math.max(preferredServicesHeight, SERVICES_MIN_HEIGHT),
+    SERVICES_MAX_HEIGHT,
+    Math.max(bodyHeight - logMinimumHeight, 1),
   );
+  const logHeight = Math.max(bodyHeight - servicesHeight, 1);
 
   return {
-    logLeft: servicesWidth,
-    logWidth: Math.max(width - servicesWidth, 20),
-    servicesWidth,
+    bodyHeight,
+    logHeight,
+    logLeft: 0,
+    logTop: HEADER_HEIGHT + servicesHeight,
+    logWidth: width,
+    servicesHeight,
+    servicesTop: HEADER_HEIGHT,
+    servicesWidth: width,
   };
 }
 
 function getServicesInnerWidth(screenWidth: number): number {
-  return Math.max(getSupervisorPaneLayout(screenWidth).servicesWidth - 2, 36);
+  return Math.max(Math.max(Math.floor(screenWidth), 40) - 2, 36);
 }
 
 function buildServiceContent(
   state: SupervisorState,
   selectedService: string | null,
   screenWidth: number,
+  logSizes: ReadonlyMap<string, LogCache> = new Map(),
 ): ServiceRenderResult {
   const innerWidth = getServicesInnerWidth(screenWidth);
   const markerWidth = 2;
-  const statusWidth = 11;
-  const groupWidth = 12;
-  const availableWidth = Math.max(innerWidth - markerWidth - groupWidth - statusWidth - 3, 22);
-  const serviceWidth = Math.min(Math.max(Math.floor(availableWidth * 0.45), 12), 18);
-  const branchWidth = Math.max(availableWidth - serviceWidth, 8);
+  const compact = innerWidth < 68;
+  const showGroup = innerWidth >= 104;
+  const statusWidth = compact ? 10 : 12;
+  const groupWidth = showGroup ? 10 : 0;
+  const pidWidth = innerWidth >= 104 ? 7 : 6;
+  const uptimeWidth = innerWidth >= 104 ? 9 : 8;
+  const logWidth = innerWidth >= 104 ? 7 : 6;
+  const compactBranchWidth = Math.min(Math.max(Math.floor(innerWidth * 0.24), 10), 18);
+  const compactServiceWidth = Math.max(innerWidth - markerWidth - statusWidth - compactBranchWidth - 2, 12);
+  const metadataWidth = statusWidth + groupWidth + pidWidth + uptimeWidth + logWidth;
+  const separatorWidth = showGroup ? 6 : 5;
+  const availableWidth = Math.max(
+    innerWidth - markerWidth - metadataWidth - separatorWidth,
+    26,
+  );
+  const serviceWidth = compact
+    ? compactServiceWidth
+    : Math.min(Math.max(Math.floor(availableWidth * 0.38), 16), 24);
+  const branchWidth = compact
+    ? compactBranchWidth
+    : Math.max(availableWidth - serviceWidth, 10);
 
   const lines: string[] = [];
   const serviceLineByName = new Map<string, number>();
   const serviceNames: string[] = [];
+  const now = Date.now();
+  let failedCount = 0;
   let runningCount = 0;
 
-  lines.push(
-    `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("GROUP", groupWidth)} ${truncate("STATUS", statusWidth)} ${truncate("BRANCH", branchWidth)}`,
-  );
+  const header = compact
+    ? `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("BRANCH", branchWidth)}`
+    : showGroup
+      ? `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("GROUP", groupWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)} ${truncate("UPTIME", uptimeWidth)} ${truncate("LOG", logWidth)}`
+      : `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)} ${truncate("UPTIME", uptimeWidth)} ${truncate("LOG", logWidth)}`;
+  const headerContent = fg(UI_THEME.tableHeader, header);
 
   for (const [groupName, serviceList] of Object.entries(state.groups)) {
     for (const serviceName of serviceList) {
@@ -349,17 +494,29 @@ function buildServiceContent(
       if (service.status === "running") {
         runningCount += 1;
       }
-      const marker = isSelected ? "{cyan-fg}>{/cyan-fg} " : "  ";
-      const name = isSelected
-        ? `{bold}${truncate(service.service, serviceWidth)}{/bold}`
-        : truncate(service.service, serviceWidth);
-      const group = truncate(groupName, groupWidth);
-      const status = colorStatus(service.status, truncate(service.status, statusWidth));
-      const branch = truncate(service.isGit ? service.branch : "-", branchWidth);
+      if (service.status === "failed") {
+        failedCount += 1;
+      }
+
+      const rowColor = isSelected ? UI_THEME.accent : UI_THEME.text;
+      const marker = isSelected ? fg(UI_THEME.accent, "> ") : "  ";
+      const name = fg(rowColor, truncate(service.service, serviceWidth));
+      const group = fg(rowColor, truncate(groupName, groupWidth));
+      const status = formatStatus(service.status, statusWidth);
+      const branch = fg(rowColor, truncate(service.isGit ? service.branch : "-", branchWidth));
+      const pid = fg(rowColor, formatServicePid(service, pidWidth));
+      const uptime = fg(rowColor, formatServiceUptime(service, uptimeWidth, now));
+      const logSize = fg(rowColor, formatServiceLogSize(logSizes.get(service.service)?.size, logWidth));
 
       serviceLineByName.set(service.service, lines.length);
       serviceNames.push(service.service);
-      lines.push(`${marker}${name} ${group} ${status} ${branch}`);
+      lines.push(
+        compact
+          ? `${marker}${name} ${status} ${branch}`
+          : showGroup
+            ? `${marker}${name} ${status} ${group} ${branch} ${pid} ${uptime} ${logSize}`
+            : `${marker}${name} ${status} ${branch} ${pid} ${uptime} ${logSize}`,
+      );
     }
   }
 
@@ -367,6 +524,8 @@ function buildServiceContent(
 
   return {
     content: lines.join("\n"),
+    failedCount,
+    headerContent,
     runningCount,
     selectedLine,
     serviceNames,
@@ -561,17 +720,22 @@ export function buildHeaderContent(
   width: number,
 ): string {
   const contentWidth = Math.max(width - 2, 10);
-  const bodyInset = contentWidth > 12 ? 2 : 1;
+  const bodyInset = contentWidth > 18 ? 2 : 1;
   const bodyWidth = Math.max(contentWidth - bodyInset * 2, 8);
-  const title = truncate(project, contentWidth).trimEnd();
-  const titlePadding = Math.max(Math.floor((contentWidth - title.length) / 2), 0);
-  const summaryWidth = Math.min(serviceSummary.length, Math.max(bodyWidth - 12, 8));
-  const metricsWidth = Math.max(bodyWidth - summaryWidth - 2, 0);
-  const left = truncate(serviceSummary, summaryWidth).trimEnd();
-  const right = metricsWidth > 0 ? truncate(metricsText, metricsWidth).trimEnd() : "";
-  const spacer = right ? " ".repeat(Math.max(bodyWidth - left.length - right.length, 1)) : "";
+  const titleWidth = Math.max(Math.floor(bodyWidth * 0.48), 8);
+  const title = truncate(project, titleWidth).trimEnd();
+  const metricsWidth = Math.max(bodyWidth - title.length - 2, 0);
+  const metrics = metricsWidth > 0 ? truncate(metricsText, metricsWidth).trimEnd() : "";
+  const titleSpacer = metrics ? " ".repeat(Math.max(bodyWidth - title.length - metrics.length, 1)) : "";
+  const summaryWidth = Math.max(bodyWidth - 8, 8);
+  const summary = truncate(serviceSummary, summaryWidth).trimEnd();
+  const live = bodyWidth - summary.length > 7 ? fg(UI_THEME.steady, "live") : "";
+  const summarySpacer = live ? " ".repeat(Math.max(bodyWidth - summary.length - 4, 1)) : "";
 
-  return `${" ".repeat(titlePadding)}{bold}${title}{/bold}\n${" ".repeat(bodyInset)}${left}${spacer}${right}${" ".repeat(bodyInset)}`;
+  return [
+    `${" ".repeat(bodyInset)}${bold(title)}${titleSpacer}${muted(metrics)}`,
+    `${" ".repeat(bodyInset)}${fg(UI_THEME.accent, summary)}${summarySpacer}${live}`,
+  ].join("\n");
 }
 
 function quotePosix(value: string): string {
@@ -891,8 +1055,9 @@ function formatActionMessage(response: SupervisorResponse, fallback: string): Fo
 
 export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
   await new Promise<void>((resolve) => {
-    const initialPaneLayout = getSupervisorPaneLayout(process.stdout.columns ?? 120);
+    const initialPaneLayout = getSupervisorPaneLayout(process.stdout.columns ?? 120, process.stdout.rows ?? 32);
     const screen = blessed.screen({
+      fullUnicode: true,
       smartCSR: true,
       title: `dev ${config.project}`,
       useBCE: true,
@@ -905,15 +1070,44 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       height: HEADER_HEIGHT,
       border: "line",
       tags: true,
+      style: {
+        border: { fg: UI_THEME.border },
+        fg: UI_THEME.text,
+      },
+    });
+
+    const servicesFrameBox = blessed.box({
+      top: initialPaneLayout.servicesTop,
+      left: 0,
+      width: initialPaneLayout.servicesWidth,
+      height: initialPaneLayout.servicesHeight,
+      border: "line",
+      label: " Services ",
+      tags: true,
+      mouse: true,
+      style: {
+        border: { fg: UI_THEME.accent },
+        fg: UI_THEME.text,
+      },
+    });
+
+    const servicesHeaderBox = blessed.box({
+      top: initialPaneLayout.servicesTop + 1,
+      left: 1,
+      width: Math.max(initialPaneLayout.servicesWidth - 2, 1),
+      height: 1,
+      tags: true,
+      mouse: true,
+      style: {
+        fg: UI_THEME.tableHeader,
+      },
     });
 
     const servicesBox = blessed.box({
-      top: HEADER_HEIGHT,
-      left: 0,
-      width: initialPaneLayout.servicesWidth,
-      height: `100%-${HEADER_HEIGHT + FOOTER_HEIGHT}`,
-      border: "line",
-      label: " Services ",
+      top: initialPaneLayout.servicesTop + 2,
+      left: 1,
+      width: Math.max(initialPaneLayout.servicesWidth - 2, 1),
+      height: Math.max(initialPaneLayout.servicesHeight - 3, 1),
       tags: true,
       mouse: true,
       scrollable: true,
@@ -922,19 +1116,21 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         ch: " ",
       },
       style: {
-        border: { fg: "cyan" },
-        scrollbar: { bg: "cyan" },
+        fg: UI_THEME.text,
+        scrollbar: { bg: UI_THEME.accent },
       },
       vi: false,
+      wrap: false,
     });
 
     const logBox = blessed.scrollabletext({
-      top: HEADER_HEIGHT,
+      top: initialPaneLayout.logTop,
       left: initialPaneLayout.logLeft,
       width: initialPaneLayout.logWidth,
-      height: `100%-${HEADER_HEIGHT + FOOTER_HEIGHT}`,
+      height: initialPaneLayout.logHeight,
       border: "line",
       label: " Logs ",
+      tags: true,
       mouse: true,
       scrollable: true,
       alwaysScroll: true,
@@ -943,8 +1139,9 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         ch: " ",
       },
       style: {
-        border: { fg: "yellow" },
-        scrollbar: { bg: "yellow" },
+        border: { fg: UI_THEME.logAccent },
+        fg: UI_THEME.text,
+        scrollbar: { bg: UI_THEME.logAccent },
       },
       vi: false,
       wrap: true,
@@ -958,11 +1155,14 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       border: "line",
       tags: true,
       style: {
-        border: { fg: "white" },
+        border: { fg: UI_THEME.border },
+        fg: UI_THEME.text,
       },
     });
 
     screen.append(header);
+    screen.append(servicesFrameBox);
+    screen.append(servicesHeaderBox);
     screen.append(servicesBox);
     screen.append(logBox);
     screen.append(footer);
@@ -984,6 +1184,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     let screenClosed = false;
     let lastMetricsRefreshAt = 0;
     let metricsRefreshPromise: Promise<void> | null = null;
+    let logCacheVersion = 0;
     let previousCpuSnapshot: CpuSnapshot | null = null;
     let resourceMetrics: ResourceMetrics = {
       cpuPercent: null,
@@ -1079,16 +1280,31 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       const tone = footerMessage.tone;
       const shortcuts =
         mode === "branchPrompt" ? "" : buildShortcutLine(selected, selectedHasLogs());
+      const footerInset = Number(screen.width) > 48 ? 2 : 1;
+      const inset = " ".repeat(footerInset);
+      const availableWidth = Math.max(Number(screen.width) - 2 - footerInset * 2, 10);
       footer.setContent(
-        `{${toneTag(tone)}}${truncate(message, Math.max(Number(screen.width) - 4, 10)).trimEnd()}{/${toneTag(tone)}}\n${truncate(shortcuts, Math.max(Number(screen.width) - 4, 10)).trimEnd()}`,
+        `${inset}{${toneTag(tone)}}${truncate(message, availableWidth).trimEnd()}{/${toneTag(tone)}}\n${inset}${muted(truncate(shortcuts, availableWidth).trimEnd())}`,
       );
     };
 
     const applyPaneLayout = () => {
-      const paneLayout = getSupervisorPaneLayout(Number(screen.width));
-      servicesBox.width = paneLayout.servicesWidth;
+      const paneLayout = getSupervisorPaneLayout(Number(screen.width), Number(screen.height));
+      servicesFrameBox.top = paneLayout.servicesTop;
+      servicesFrameBox.left = 0;
+      servicesFrameBox.width = paneLayout.servicesWidth;
+      servicesFrameBox.height = paneLayout.servicesHeight;
+      servicesHeaderBox.top = paneLayout.servicesTop + 1;
+      servicesHeaderBox.left = 1;
+      servicesHeaderBox.width = Math.max(paneLayout.servicesWidth - 2, 1);
+      servicesBox.top = paneLayout.servicesTop + 2;
+      servicesBox.left = 1;
+      servicesBox.width = Math.max(paneLayout.servicesWidth - 2, 1);
+      servicesBox.height = Math.max(paneLayout.servicesHeight - 3, 1);
+      logBox.top = paneLayout.logTop;
       logBox.left = paneLayout.logLeft;
       logBox.width = paneLayout.logWidth;
+      logBox.height = paneLayout.logHeight;
     };
 
     const renderHeader = (serviceSummary: string) => {
@@ -1103,7 +1319,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       const w = Math.max(1, (Number(logBox.width) || 20) - 2);
       const vertPad = Math.max(0, Math.floor((h - 1) / 2));
       const horizPad = Math.max(0, Math.floor((w - text.length) / 2));
-      return "\n".repeat(vertPad) + " ".repeat(horizPad) + text;
+      return "\n".repeat(vertPad) + " ".repeat(horizPad) + muted(text);
     };
 
     const applyLogContent = (serviceName: string | null) => {
@@ -1116,7 +1332,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       const service = state.services[serviceName];
       const cached = logCaches.get(serviceName);
       const content = getDisplayLogContent(service, cached);
-      const label = ` Logs: ${service.service} `;
+      const follow = logPinnedToBottom ? " follow" : " paused";
+      const label = ` Logs: ${service.service} / ${service.status}${follow} `;
 
       logBox.setLabel(label);
       logBox.setContent(content === "No logs yet." ? centerInLogBox("No logs yet.") : content);
@@ -1137,9 +1354,24 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       }
 
       const service = state.services[serviceName];
-      const refresh = readLogTail(service.logPath, logCaches.get(serviceName) ?? null, LOG_TAIL_LINES)
+      const previousCache = logCaches.get(serviceName) ?? null;
+      const refresh = readLogTail(service.logPath, previousCache, LOG_TAIL_LINES)
         .then((cache) => {
+          const cacheChanged = cache !== previousCache;
           logCaches.set(serviceName, cache);
+          if (cacheChanged) {
+            logCacheVersion += 1;
+          }
+          if (cacheChanged && state) {
+            applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches));
+            lastRenderedSelectionKey = [
+              state.updatedAt,
+              selectedService ?? "-",
+              Number(screen.width),
+              Number(screen.height),
+              logCacheVersion,
+            ].join(":");
+          }
           if (selectedService === serviceName) {
             applyLogContent(serviceName);
             renderFooter();
@@ -1160,7 +1392,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     };
 
     const ensureSelectedVisible = (selectedLine: number) => {
-      const visibleHeight = Math.max(getBodyHeight(Number(screen.height)) - 2, 1);
+      const visibleHeight = Math.max(Number(servicesBox.height) || 1, 1);
       const currentScroll = servicesBox.getScroll();
 
       if (selectedLine <= currentScroll) {
@@ -1176,6 +1408,9 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     const applyServiceRender = (serviceRender: ServiceRenderResult) => {
       lastServiceRender = serviceRender;
       serviceNames = serviceRender.serviceNames;
+      const failedText = serviceRender.failedCount > 0 ? ` / ${serviceRender.failedCount} failed` : "";
+      servicesFrameBox.setLabel(` Services ${serviceRender.runningCount}/${serviceRender.totalServices} running${failedText} `);
+      servicesHeaderBox.setContent(serviceRender.headerContent);
       servicesBox.setContent(serviceRender.content);
       ensureSelectedVisible(serviceRender.selectedLine);
     };
@@ -1196,7 +1431,10 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
           footer.show();
           renderHeader("Supervisor is not running.");
           lastServiceRender = null;
+          servicesHeaderBox.setContent("");
           servicesBox.setContent("");
+          servicesFrameBox.hide();
+          servicesHeaderBox.hide();
           servicesBox.hide();
           logBox.hide();
           logBox.setContent("Supervisor is not running.");
@@ -1212,15 +1450,22 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         const selectedChanged = nextSelected !== selectedService;
         selectedService = nextSelected;
 
-        const serviceRenderKey = `${state.updatedAt}:${selectedService ?? "-"}`;
+        const serviceRenderKey = [
+          state.updatedAt,
+          selectedService ?? "-",
+          Number(screen.width),
+          Number(screen.height),
+          logCacheVersion,
+        ].join(":");
         let currentServiceRender = lastServiceRender;
         if (serviceRenderKey !== lastRenderedSelectionKey || !currentServiceRender) {
-          currentServiceRender = buildServiceContent(state, selectedService, Number(screen.width));
+          currentServiceRender = buildServiceContent(state, selectedService, Number(screen.width), logCaches);
           applyServiceRender(currentServiceRender);
           lastRenderedSelectionKey = serviceRenderKey;
         }
 
-        const serviceSummary = `Running ${currentServiceRender.runningCount}/${currentServiceRender.totalServices} services`;
+        const failedSummary = currentServiceRender.failedCount > 0 ? ` - ${currentServiceRender.failedCount} failed` : "";
+        const serviceSummary = `${currentServiceRender.runningCount}/${currentServiceRender.totalServices} running${failedSummary}`;
         renderHeader(serviceSummary);
 
         const selected = getSelectedService();
@@ -1236,6 +1481,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
 
         header.show();
         footer.show();
+        servicesFrameBox.show();
+        servicesHeaderBox.show();
         servicesBox.show();
         logBox.show();
 
@@ -1260,7 +1507,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       const nextIndex = Math.min(Math.max(currentIndex + direction, 0), serviceNames.length - 1);
       selectedService = serviceNames[nextIndex] ?? selectedService;
       if (state) {
-        applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width)));
+        applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches));
         applyLogContent(selectedService);
         if (selectedService) {
           refreshLogCache(selectedService);
@@ -1534,6 +1781,10 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       resolve();
     };
 
+    servicesFrameBox.on("wheelup", () => moveSelection(-1));
+    servicesFrameBox.on("wheeldown", () => moveSelection(1));
+    servicesHeaderBox.on("wheelup", () => moveSelection(-1));
+    servicesHeaderBox.on("wheeldown", () => moveSelection(1));
     servicesBox.on("wheelup", () => moveSelection(-1));
     servicesBox.on("wheeldown", () => moveSelection(1));
     logBox.on("wheelup", () => {
