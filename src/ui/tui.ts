@@ -147,43 +147,15 @@ if (!stdin.isTTY || !stdout.isTTY) {
   process.exit(0);
 }
 
-const lines = content.replace(/\r\n/g, "\n").split("\n");
 let cleanedUp = false;
-let top = 0;
 
 function terminalRows() {
   return Math.max(1, stdout.rows || 24);
 }
 
-function rows() {
-  return Math.max(1, terminalRows() - 1);
-}
-
-function maxTop() {
-  return Math.max(0, lines.length - rows());
-}
-
-function render() {
-  top = Math.max(0, Math.min(top, maxTop()));
-  const r = rows();
-  stdout.write("\x1b[H");
-  for (let i = 0; i < r; i++) {
-    stdout.write((lines[top + i] ?? "") + "\x1b[K");
-    if (i < r - 1) stdout.write("\n");
-  }
-  stdout.write("\x1b[" + (r + 1) + ";1H\x1b[2m--- press v or q to return ---\x1b[0m\x1b[K");
-}
-
-function enterPager() {
-  stdout.write("\x1b[?1049h\x1b[?1007h\x1b[?25l\x1b[2J\x1b[H");
-  stdout.on("resize", render);
-  top = maxTop();
-  render();
-}
-
-function scrollPager(offset) {
-  top = Math.max(0, Math.min(top + offset, maxTop()));
-  render();
+function clearScreenAndScrollback() {
+  stdout.write("\n".repeat(terminalRows()));
+  stdout.write("\x1b[3J\x1b[2J\x1b[H");
 }
 
 function cleanup() {
@@ -192,8 +164,8 @@ function cleanup() {
   }
 
   cleanedUp = true;
-  stdout.off("resize", render);
-  stdout.write("\x1b[?1007l\x1b[?25h\x1b[0m\x1b[2J\x1b[H\x1b[?1049l");
+  clearScreenAndScrollback();
+  stdout.write("\x1b[?25h\x1b[0m");
   stdin.setRawMode(false);
 }
 
@@ -204,59 +176,21 @@ function finish() {
 
 process.on("exit", cleanup);
 
+stdout.write("\x1b[?25l\x1b[0m");
+clearScreenAndScrollback();
+stdout.write(content);
+if (content.length > 0 && !content.endsWith("\n")) {
+  stdout.write("\n");
+}
+stdout.write("\x1b[2m--- press v or q to return ---\x1b[0m");
+
 stdin.setRawMode(true);
 stdin.resume();
-enterPager();
 stdin.on("data", (chunk) => {
   const input = chunk.toString("utf8");
   let i = 0;
   while (i < input.length) {
     const rest = input.slice(i);
-    if (rest.startsWith("\x1b[A") || rest.startsWith("\x1bOA")) {
-      scrollPager(-1);
-      i += 3; continue;
-    }
-    if (rest.startsWith("\x1b[B") || rest.startsWith("\x1bOB")) {
-      scrollPager(1);
-      i += 3; continue;
-    }
-    if (rest.startsWith("\x1b[5~")) {
-      scrollPager(-rows());
-      i += 4; continue;
-    }
-    if (rest.startsWith("\x1b[6~")) {
-      scrollPager(rows());
-      i += 4; continue;
-    }
-    if (rest.startsWith("\x1b[1~")) {
-      top = 0; render();
-      i += 4; continue;
-    }
-    if (rest.startsWith("\x1b[4~")) {
-      top = maxTop(); render();
-      i += 4; continue;
-    }
-    if (rest.startsWith("\x1bOH") || rest.startsWith("\x1b[H")) {
-      top = 0; render();
-      i += 3; continue;
-    }
-    if (rest.startsWith("\x1bOF") || rest.startsWith("\x1b[F")) {
-      top = maxTop(); render();
-      i += 3; continue;
-    }
-    const sgrMouse = rest.match(/^\x1b\[<(\d+);\d+;\d+[mM]/);
-    if (sgrMouse) {
-      const button = Number(sgrMouse[1]);
-      if (button === 64) scrollPager(-3);
-      if (button === 65) scrollPager(3);
-      i += sgrMouse[0].length; continue;
-    }
-    if (rest.startsWith("\x1b[M") && rest.length >= 6) {
-      const button = rest.charCodeAt(3) - 32;
-      if (button === 64) scrollPager(-3);
-      if (button === 65) scrollPager(3);
-      i += 6; continue;
-    }
     if (rest[0] === "\x1b") {
       i += 1; continue;
     }
