@@ -90,12 +90,163 @@ const HEADER_HEIGHT = 4;
 const METRICS_REFRESH_MS = 1_000;
 const SCREEN_POLL_MS = 250;
 const FOOTER_HEIGHT = 4;
-const LOG_VIEWER_SCRIPT = [
-  'printf "\\033[2J\\033[H"',
-  'cat "$1" 2>/dev/null || printf "(log file not found)\\n"',
-  'printf "\\n\\033[2m--- press any key to return ---\\033[0m\\n"',
-  "read -rn 1 -s _",
-].join("; ");
+const LOG_VIEWER_SCRIPT = String.raw`
+const fs = require("node:fs");
+
+const logPath = process.argv[1];
+const stdin = process.stdin;
+const stdout = process.stdout;
+
+let content;
+try {
+  content = fs.readFileSync(logPath, "utf8");
+} catch {
+  content = "(log file not found)\n";
+}
+
+if (!stdin.isTTY || !stdout.isTTY) {
+  stdout.write(content);
+  process.exit(0);
+}
+
+const lines = content.replace(/\r\n/g, "\n").split("\n");
+let top = 0;
+let pasteMode = false;
+
+function visibleRows() {
+  return Math.max(1, (stdout.rows || 24) - 1);
+}
+
+function maxTop() {
+  return Math.max(0, lines.length - visibleRows());
+}
+
+function clampTop() {
+  top = Math.max(0, Math.min(top, maxTop()));
+}
+
+function render() {
+  clampTop();
+  const rows = visibleRows();
+  stdout.write("\x1b[?25l\x1b[?7l\x1b[2J\x1b[H");
+
+  for (let index = 0; index < rows; index += 1) {
+    stdout.write(lines[top + index] ?? "");
+    stdout.write("\x1b[K");
+    if (index < rows - 1) {
+      stdout.write("\n");
+    }
+  }
+
+  stdout.write("\x1b[" + (rows + 1) + ";1H\x1b[2m--- arrows/page scroll, press v to return ---\x1b[0m\x1b[K");
+}
+
+function finish() {
+  stdout.write("\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[0m");
+  process.exit(0);
+}
+
+function scroll(offset) {
+  top += offset;
+  render();
+}
+
+function handleSequence(sequence) {
+  switch (sequence) {
+    case "\x1b[A":
+    case "\x1bOA":
+      scroll(-1);
+      return true;
+    case "\x1b[B":
+    case "\x1bOB":
+      scroll(1);
+      return true;
+    case "\x1b[5~":
+      scroll(-visibleRows());
+      return true;
+    case "\x1b[6~":
+      scroll(visibleRows());
+      return true;
+    case "\x1b[H":
+    case "\x1b[1~":
+    case "\x1bOH":
+      top = 0;
+      render();
+      return true;
+    case "\x1b[F":
+    case "\x1b[4~":
+    case "\x1bOF":
+      top = maxTop();
+      render();
+      return true;
+    default:
+      return false;
+  }
+}
+
+function handleInput(chunk) {
+  const input = chunk.toString("utf8");
+  let index = 0;
+
+  while (index < input.length) {
+    if (pasteMode) {
+      const end = input.indexOf("\x1b[201~", index);
+      if (end === -1) {
+        return;
+      }
+
+      pasteMode = false;
+      index = end + "\x1b[201~".length;
+      continue;
+    }
+
+    if (input.startsWith("\x1b[200~", index)) {
+      pasteMode = true;
+      index += "\x1b[200~".length;
+      continue;
+    }
+
+    const candidates = [
+      "\x1b[5~",
+      "\x1b[6~",
+      "\x1b[1~",
+      "\x1b[4~",
+      "\x1b[A",
+      "\x1b[B",
+      "\x1b[H",
+      "\x1b[F",
+      "\x1bOA",
+      "\x1bOB",
+      "\x1bOH",
+      "\x1bOF",
+    ];
+    const sequence = candidates.find((candidate) => input.startsWith(candidate, index));
+    if (sequence) {
+      handleSequence(sequence);
+      index += sequence.length;
+      continue;
+    }
+
+    if (input[index] === "v") {
+      finish();
+    }
+
+    index += 1;
+  }
+}
+
+stdin.setRawMode(true);
+stdin.resume();
+stdin.on("data", handleInput);
+stdout.on("resize", render);
+process.on("exit", () => {
+  stdout.write("\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[0m");
+});
+
+stdout.write("\x1b[?2004h");
+top = maxTop();
+render();
+`;
 const execFileAsync = promisify(execFile);
 
 function truncate(value: string, max: number): string {
@@ -458,8 +609,8 @@ export function buildShortcutLine(selected: ManagedServiceState | null, hasLogs 
 
 export function buildLogViewerCommand(logPath: string): LogViewerCommand {
   return {
-    command: "bash",
-    args: ["-c", LOG_VIEWER_SCRIPT, "--", logPath],
+    command: process.execPath,
+    args: ["--eval", LOG_VIEWER_SCRIPT, logPath],
   };
 }
 

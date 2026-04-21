@@ -684,12 +684,17 @@ test("buildLogViewerCommand uses the native terminal viewer script", async () =>
   const { buildLogViewerCommand } = await import(path.join(projectRoot, "dist/lib.js"));
   const command = buildLogViewerCommand("/tmp/api.log");
 
-  assert.equal(command.command, "bash");
-  assert.deepEqual(command.args.slice(0, 2), ["-c", command.args[1]]);
-  assert.equal(command.args[2], "--");
-  assert.equal(command.args[3], "/tmp/api.log");
-  assert.match(command.args[1], /cat "\$1"/);
-  assert.match(command.args[1], /read -rn 1 -s _/);
+  assert.equal(command.command, process.execPath);
+  assert.equal(command.args[0], "--eval");
+  assert.equal(command.args[2], "/tmp/api.log");
+  assert.match(command.args[1], /press v to return/);
+  assert.match(command.args[1], /case "\\x1b\[A"/);
+  assert.match(command.args[1], /case "\\x1b\[B"/);
+  assert.match(command.args[1], /case "\\x1b\[5~"/);
+  assert.match(command.args[1], /case "\\x1b\[6~"/);
+  assert.match(command.args[1], /input\.startsWith\("\\x1b\[200~"/);
+  assert.match(command.args[1], /input\[index\] === "v"/);
+  assert.doesNotMatch(command.args[1], /press any key to return/);
 });
 
 test("launchExternalLogViewer suspends and restores the screen around the viewer process", async () => {
