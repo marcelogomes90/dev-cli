@@ -686,6 +686,16 @@ test("buildTerminalLaunchCommands prioritizes the current terminal and service c
   const { buildTerminalLaunchCommands } = await import(path.join(projectRoot, "dist/lib.js"));
   const cwd = "/tmp/my service/quote'path";
 
+  const tmuxSession = buildTerminalLaunchCommands(cwd, {
+    env: { TMUX: "/tmp/tmux-501/default,123,0" },
+    platform: "darwin",
+    windowTitle: "api",
+  });
+  assert.equal(tmuxSession[0].label, "tmux");
+  assert.equal(tmuxSession[0].command, "tmux");
+  assert.deepEqual(tmuxSession[0].args, ["new-window", "-c", cwd, "-n", "api"]);
+  assert.equal(tmuxSession[0].cwd, cwd);
+
   const alacrittyDarwin = buildTerminalLaunchCommands(cwd, {
     env: { __CFBundleIdentifier: "org.alacritty" },
     platform: "darwin",

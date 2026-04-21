@@ -221,7 +221,7 @@ The header shows the project name, running service count, and live CPU/RAM usage
 - `c`: clear logs for the selected service when logs exist
 - `v`: open the full service log in the native terminal viewer
 - `e`: open the selected service directory in the configured editor
-- `t`: open the selected service directory in a new terminal window
+- `t`: open the selected service directory in a new terminal window, or a new tmux window when already inside tmux
 
 ### Git actions
 

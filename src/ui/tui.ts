@@ -68,6 +68,7 @@ export interface TerminalLaunchCommand {
 interface TerminalLaunchOptions {
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
+  windowTitle?: string;
 }
 
 interface LogViewerProgram {
@@ -613,6 +614,10 @@ function detectTerminalIds(env: NodeJS.ProcessEnv): string[] {
   const bundleId = env.__CFBundleIdentifier?.toLowerCase();
   const term = env.TERM?.toLowerCase();
 
+  if (env.TMUX) {
+    add("tmux");
+  }
+
   if (env.ALACRITTY_WINDOW_ID || env.ALACRITTY_SOCKET || bundleId === "org.alacritty") {
     add("alacritty");
   }
@@ -652,7 +657,12 @@ function detectTerminalIds(env: NodeJS.ProcessEnv): string[] {
   return ids;
 }
 
-function createTerminalLaunchCommand(id: string, cwd: string, platform: NodeJS.Platform): TerminalLaunchCommand | null {
+function createTerminalLaunchCommand(
+  id: string,
+  cwd: string,
+  platform: NodeJS.Platform,
+  windowTitle?: string,
+): TerminalLaunchCommand | null {
   switch (id) {
     case "alacritty":
       return platform === "darwin"
@@ -689,6 +699,13 @@ function createTerminalLaunchCommand(id: string, cwd: string, platform: NodeJS.P
       ].join("\n");
       return { args: ["-e", script], command: "osascript", cwd, label: "Terminal" };
     }
+    case "tmux": {
+      const args = ["new-window", "-c", cwd];
+      if (windowTitle) {
+        args.push("-n", windowTitle);
+      }
+      return { args, command: "tmux", cwd, label: "tmux" };
+    }
     case "wezterm":
       return { args: ["start", "--cwd", cwd], command: "wezterm", cwd, label: "WezTerm" };
     case "windows-cmd":
@@ -713,7 +730,7 @@ function createTerminalLaunchCommand(id: string, cwd: string, platform: NodeJS.P
 
 export function buildTerminalLaunchCommands(
   cwd: string,
-  { env = process.env, platform = process.platform }: TerminalLaunchOptions = {},
+  { env = process.env, platform = process.platform, windowTitle }: TerminalLaunchOptions = {},
 ): TerminalLaunchCommand[] {
   const ids = detectTerminalIds(env);
 
@@ -737,7 +754,7 @@ export function buildTerminalLaunchCommands(
 
   const commands: TerminalLaunchCommand[] = [];
   for (const id of ids) {
-    const command = createTerminalLaunchCommand(id, cwd, platform);
+    const command = createTerminalLaunchCommand(id, cwd, platform, windowTitle);
     if (
       command &&
       !commands.some((candidate) => candidate.command === command.command && candidate.args.join("\0") === command.args.join("\0"))
@@ -1355,7 +1372,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return;
       }
 
-      const result = await launchTerminal(buildTerminalLaunchCommands(service.cwd));
+      const result = await launchTerminal(buildTerminalLaunchCommands(service.cwd, { windowTitle: service.service }));
       if (!result.ok) {
         setFooterMessage(
           "error",
