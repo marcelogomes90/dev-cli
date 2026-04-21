@@ -2,10 +2,10 @@ export type MessageTone = "error" | "info" | "success" | "warning";
 
 export const UI_THEME = {
   accent: "cyan",
-  border: "gray",
+  border: "white",
   danger: "red",
   logAccent: "magenta",
-  muted: "gray",
+  muted: "white",
   steady: "green",
   tableHeader: "yellow",
   text: "white",
