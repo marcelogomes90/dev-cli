@@ -10,7 +10,7 @@ It starts services through a detached supervisor process, keeps live state on di
 - Expands service dependencies during the initial startup plan.
 - Keeps a long-lived supervisor process per project so commands share the same runtime state.
 - Opens a terminal UI to start, stop, restart, install, inspect, and manage services individually.
-- Shows live CPU/RAM metrics and git branch information when a service directory is a git repository.
+- Shows live workspace CPU/RAM metrics, per-service CPU/RAM usage, and git branch information when a service directory is a git repository.
 - Stores per-service logs and opens them in the native terminal viewer from the UI.
 - Opens a service directory in your editor or in a new terminal window from the UI.
 
@@ -203,7 +203,7 @@ Behavior:
 
 The built-in UI lets you manage services individually after the supervisor is running.
 
-The header shows the project name, running service count, and live CPU/RAM usage. The service list shows the current git branch for service directories that are git repositories.
+The header shows the project name, running service count, and live CPU/RAM usage. The service list shows the current git branch for service directories that are git repositories, plus per-service memory and CPU usage when the terminal is wide enough.
 
 ### Navigation
 

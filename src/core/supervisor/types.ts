@@ -31,7 +31,9 @@ export interface ManagedServiceState {
   lastStartedAt: string | null;
   lastStoppedAt: string | null;
   logPath: string;
+  memoryBytes: number | null;
   pid: number | null;
+  cpuPercent: number | null;
   service: string;
   status: ManagedServiceStatus;
 }

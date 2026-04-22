@@ -2,8 +2,8 @@ interface FormatBytesOptions {
   largePrecision?: number;
 }
 
-export function formatBytes(value: number, { largePrecision = 1 }: FormatBytesOptions = {}): string {
-  const units = ["B", "KB", "MB", "GB", "TB"];
+export function formatBytes(value: number, _options: FormatBytesOptions = {}): string {
+  const units = ["B", "K", "M", "G", "T"];
   let current = Math.max(value, 0);
   let unitIndex = 0;
 
@@ -12,6 +12,5 @@ export function formatBytes(value: number, { largePrecision = 1 }: FormatBytesOp
     unitIndex += 1;
   }
 
-  const precision = unitIndex === 0 ? 0 : current >= 10 ? largePrecision : 1;
-  return `${current.toFixed(precision)}${units[unitIndex]}`;
+  return `${Math.round(current)}${units[unitIndex]}`;
 }

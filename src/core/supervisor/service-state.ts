@@ -21,7 +21,9 @@ export function createServiceState(
     lastStartedAt: null,
     lastStoppedAt: null,
     logPath: path.join(paths.logsDir, `${service.name}.log`),
+    memoryBytes: null,
     pid: null,
+    cpuPercent: null,
     service: service.name,
     status: "stopped",
   };

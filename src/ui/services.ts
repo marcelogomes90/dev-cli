@@ -88,6 +88,24 @@ function formatServicePid(service: ManagedServiceState, width: number): string {
   return truncate(service.pid ? String(service.pid) : "-", width);
 }
 
+function formatServiceMemory(service: ManagedServiceState, width: number): string {
+  return truncate(
+    service.memoryBytes === null || service.memoryBytes === undefined
+      ? "--"
+      : formatBytes(service.memoryBytes),
+    width,
+  );
+}
+
+function formatServiceCpu(service: ManagedServiceState, width: number): string {
+  return truncate(
+    service.cpuPercent === null || service.cpuPercent === undefined
+      ? "--"
+      : `${Math.round(service.cpuPercent)}%`,
+    width,
+  );
+}
+
 function formatServiceUptime(service: ManagedServiceState, width: number, now: number): string {
   return truncate(getServiceAgeLabel(service, now), width);
 }
@@ -108,17 +126,19 @@ export function buildServiceContent(
 ): ServiceRenderResult {
   const innerWidth = getServicesInnerWidth(screenWidth);
   const markerWidth = 2;
-  const compact = innerWidth < 68;
+  const compact = innerWidth < 84;
   const showGroup = innerWidth >= 104;
   const statusWidth = compact ? 10 : 12;
   const groupWidth = showGroup ? 10 : 0;
   const pidWidth = innerWidth >= 104 ? 7 : 6;
   const uptimeWidth = innerWidth >= 104 ? 9 : 8;
+  const memoryWidth = innerWidth >= 104 ? 8 : 7;
+  const cpuWidth = 5;
   const logWidth = innerWidth >= 104 ? 7 : 6;
   const compactBranchWidth = Math.min(Math.max(Math.floor(innerWidth * 0.24), 10), 18);
   const compactServiceWidth = Math.max(innerWidth - markerWidth - statusWidth - compactBranchWidth - 2, 12);
-  const metadataWidth = statusWidth + groupWidth + pidWidth + uptimeWidth + logWidth;
-  const separatorWidth = showGroup ? 6 : 5;
+  const metadataWidth = statusWidth + groupWidth + pidWidth + uptimeWidth + memoryWidth + cpuWidth + logWidth;
+  const separatorWidth = showGroup ? 8 : 7;
   const availableWidth = Math.max(
     innerWidth - markerWidth - metadataWidth - separatorWidth,
     26,
@@ -140,8 +160,8 @@ export function buildServiceContent(
   const header = compact
     ? `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("BRANCH", branchWidth)}`
     : showGroup
-      ? `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("GROUP", groupWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)} ${truncate("UPTIME", uptimeWidth)} ${truncate("LOG", logWidth)}`
-      : `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)} ${truncate("UPTIME", uptimeWidth)} ${truncate("LOG", logWidth)}`;
+      ? `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("GROUP", groupWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)} ${truncate("UPTIME", uptimeWidth)} ${truncate("MEM", memoryWidth)} ${truncate("CPU", cpuWidth)} ${truncate("LOG", logWidth)}`
+      : `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)} ${truncate("UPTIME", uptimeWidth)} ${truncate("MEM", memoryWidth)} ${truncate("CPU", cpuWidth)} ${truncate("LOG", logWidth)}`;
   const headerContent = fg(UI_THEME.tableHeader, header);
 
   for (const [groupName, serviceList] of Object.entries(state.groups)) {
@@ -167,6 +187,8 @@ export function buildServiceContent(
       const branch = fg(rowColor, truncate(service.isGit ? service.branch : "-", branchWidth));
       const pid = fg(rowColor, formatServicePid(service, pidWidth));
       const uptime = fg(rowColor, formatServiceUptime(service, uptimeWidth, now));
+      const memory = fg(rowColor, formatServiceMemory(service, memoryWidth));
+      const cpu = fg(rowColor, formatServiceCpu(service, cpuWidth));
       const logSize = fg(rowColor, formatServiceLogSize(logSizes.get(service.service)?.size, logWidth));
 
       serviceLineByName.set(service.service, lines.length);
@@ -175,8 +197,8 @@ export function buildServiceContent(
         compact
           ? `${marker}${name} ${status} ${branch}`
           : showGroup
-            ? `${marker}${name} ${status} ${group} ${branch} ${pid} ${uptime} ${logSize}`
-            : `${marker}${name} ${status} ${branch} ${pid} ${uptime} ${logSize}`,
+            ? `${marker}${name} ${status} ${group} ${branch} ${pid} ${uptime} ${memory} ${cpu} ${logSize}`
+            : `${marker}${name} ${status} ${branch} ${pid} ${uptime} ${memory} ${cpu} ${logSize}`,
       );
     }
   }

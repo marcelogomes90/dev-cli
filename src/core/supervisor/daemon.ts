@@ -12,6 +12,7 @@ import {
 } from "../../utils/process";
 import { buildSupervisorPlan, DEPENDENCY_START_DELAY_MS, resolveTargets, type SupervisorPlan } from "./plan";
 import { clearSupervisorFiles, ensureSupervisorDirs, getSupervisorPaths } from "./paths";
+import { readProcessTreeResourceMetrics, type ProcessResourceSample } from "./process-metrics";
 import { sanitizeLogChunk } from "./log-sanitizer";
 import { buildShellSpawn, resolveRuntimeShell } from "./runtime";
 import { createServiceState } from "./service-state";
@@ -39,9 +40,38 @@ interface ManagedServiceContext {
 const BRANCH_REFRESH_INTERVAL_MS = 10_000;
 const DEFAULT_STOP_TIMEOUT_MS = 3_000;
 const DEFAULT_KILL_TIMEOUT_MS = 2_000;
+const RESOURCE_MEMORY_STEP_BYTES = 1024 * 1024;
+const RESOURCE_METRIC_STATUSES = new Set<ManagedServiceState["status"]>([
+  "installing",
+  "restarting",
+  "running",
+  "starting",
+  "stopping",
+]);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldReadResourceMetrics(entry: ManagedServiceState): boolean {
+  return entry.pid !== null && RESOURCE_METRIC_STATUSES.has(entry.status);
+}
+
+function setResourceMetrics(
+  entry: ManagedServiceState,
+  cpuPercent: number | null,
+  memoryBytes: number | null,
+): boolean {
+  const nextMemoryBytes =
+    memoryBytes === null ? null : Math.round(memoryBytes / RESOURCE_MEMORY_STEP_BYTES) * RESOURCE_MEMORY_STEP_BYTES;
+
+  if (entry.cpuPercent === cpuPercent && entry.memoryBytes === nextMemoryBytes) {
+    return false;
+  }
+
+  entry.cpuPercent = cpuPercent;
+  entry.memoryBytes = nextMemoryBytes;
+  return true;
 }
 
 export class SupervisorDaemon {
@@ -62,6 +92,8 @@ export class SupervisorDaemon {
   private readonly state: SupervisorState;
   private commandQueue = Promise.resolve();
   private lastBranchRefreshAt = 0;
+  private previousProcessResourceSample: ProcessResourceSample | null = null;
+  private refreshingDerivedState = false;
   private shuttingDown = false;
 
   private constructor(config: ProjectConfig) {
@@ -239,45 +271,86 @@ export class SupervisorDaemon {
   }
 
   private async refreshDerivedState(forceBranchRefresh = false): Promise<void> {
-    const shouldRefreshBranches =
-      forceBranchRefresh ||
-      this.lastBranchRefreshAt === 0 ||
-      Date.now() - this.lastBranchRefreshAt >= BRANCH_REFRESH_INTERVAL_MS;
-    let dirty = false;
+    if (this.refreshingDerivedState) {
+      return;
+    }
 
-    for (const [serviceName, service] of Object.entries(this.config.services)) {
-      const entry = this.state.services[serviceName];
-      if (
-        (entry.status === "installing" || entry.status === "running" || entry.status === "stopping") &&
-        !isProcessAlive(entry.pid)
-      ) {
-        entry.pid = null;
-        entry.status = "stopped";
-        entry.lastStoppedAt ??= new Date().toISOString();
-        dirty = true;
+    this.refreshingDerivedState = true;
+    try {
+      const shouldRefreshBranches =
+        forceBranchRefresh ||
+        this.lastBranchRefreshAt === 0 ||
+        Date.now() - this.lastBranchRefreshAt >= BRANCH_REFRESH_INTERVAL_MS;
+      const resourcePidsByService = new Map<string, number>();
+      let dirty = false;
+
+      for (const [serviceName, service] of Object.entries(this.config.services)) {
+        const entry = this.state.services[serviceName];
+        if (
+          RESOURCE_METRIC_STATUSES.has(entry.status) &&
+          !isProcessAlive(entry.pid)
+        ) {
+          entry.pid = null;
+          entry.status = "stopped";
+          entry.lastStoppedAt ??= new Date().toISOString();
+          setResourceMetrics(entry, null, null);
+          dirty = true;
+        }
+
+        if (shouldReadResourceMetrics(entry) && entry.pid && isProcessAlive(entry.pid)) {
+          resourcePidsByService.set(serviceName, entry.pid);
+        } else {
+          dirty = setResourceMetrics(entry, null, null) || dirty;
+        }
+
+        if (shouldRefreshBranches) {
+          const nextIsGit = await isGitRepository(service.cwd);
+          if (entry.isGit !== nextIsGit) {
+            entry.isGit = nextIsGit;
+            dirty = true;
+          }
+
+          const nextBranch = nextIsGit ? await getCurrentBranch(service.cwd).catch(() => "-") : "-";
+          if (entry.branch !== nextBranch) {
+            entry.branch = nextBranch;
+            dirty = true;
+          }
+        }
+      }
+
+      if (resourcePidsByService.size > 0) {
+        try {
+          const metricsResult = await readProcessTreeResourceMetrics(
+            resourcePidsByService.values(),
+            this.previousProcessResourceSample,
+          );
+          this.previousProcessResourceSample = metricsResult.sample;
+
+          for (const [serviceName, pid] of resourcePidsByService) {
+            const entry = this.state.services[serviceName];
+            const metrics = metricsResult.metricsByPid.get(pid);
+            dirty = setResourceMetrics(
+              entry,
+              metrics?.cpuPercent ?? null,
+              metrics?.memoryBytes ?? null,
+            ) || dirty;
+          }
+        } catch {
+          // Keep the last known values when process metrics are temporarily unavailable.
+        }
+      } else {
+        this.previousProcessResourceSample = null;
       }
 
       if (shouldRefreshBranches) {
-        const nextIsGit = await isGitRepository(service.cwd);
-        if (entry.isGit !== nextIsGit) {
-          entry.isGit = nextIsGit;
-          dirty = true;
-        }
-
-        const nextBranch = nextIsGit ? await getCurrentBranch(service.cwd).catch(() => "-") : "-";
-        if (entry.branch !== nextBranch) {
-          entry.branch = nextBranch;
-          dirty = true;
-        }
+        this.lastBranchRefreshAt = Date.now();
       }
-    }
 
-    if (shouldRefreshBranches) {
-      this.lastBranchRefreshAt = Date.now();
-    }
-
-    if (dirty) {
-      await saveSupervisorState(this.state);
+      if (dirty) {
+        await saveSupervisorState(this.state);
+      }
+    } finally {
+      this.refreshingDerivedState = false;
     }
   }
 
@@ -495,6 +568,7 @@ export class SupervisorDaemon {
       entry.exitCode = exitCode;
       entry.lastStoppedAt = new Date().toISOString();
       entry.status = status;
+      setResourceMetrics(entry, null, null);
       await saveSupervisorState(this.state);
     };
 
@@ -558,6 +632,7 @@ export class SupervisorDaemon {
     entry.status = "starting";
     entry.exitCode = null;
     entry.lastStoppedAt = null;
+    setResourceMetrics(entry, null, null);
     await writeFile(entry.logPath, "", { flag: "a" });
 
     const managed = this.spawnServiceProcess(serviceName);
@@ -593,6 +668,7 @@ export class SupervisorDaemon {
     entry.status = "installing";
     entry.exitCode = null;
     entry.lastStoppedAt = null;
+    setResourceMetrics(entry, null, null);
     await writeFile(entry.logPath, "");
 
     const managed = this.spawnManagedProcess(serviceName, installCommand);
@@ -656,6 +732,7 @@ export class SupervisorDaemon {
       entry.pid = null;
       entry.status = "stopped";
       entry.lastStoppedAt = new Date().toISOString();
+      setResourceMetrics(entry, null, null);
       await writeFile(entry.logPath, "");
       await saveSupervisorState(this.state);
       return { service: serviceName, ok: true, message: "Already stopped" };
@@ -675,6 +752,7 @@ export class SupervisorDaemon {
     if (isProcessAlive(pid)) {
       entry.status = "failed";
       entry.exitCode = entry.exitCode ?? 1;
+      setResourceMetrics(entry, null, null);
       await saveSupervisorState(this.state);
       return { service: serviceName, ok: false, message: "Failed to stop cleanly" };
     }
@@ -682,6 +760,7 @@ export class SupervisorDaemon {
     entry.pid = null;
     entry.status = "stopped";
     entry.lastStoppedAt = new Date().toISOString();
+    setResourceMetrics(entry, null, null);
     await writeFile(entry.logPath, "");
     await saveSupervisorState(this.state);
     return { service: serviceName, ok: true, message: "Stopped" };

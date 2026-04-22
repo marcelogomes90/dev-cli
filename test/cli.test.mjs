@@ -354,6 +354,10 @@ function stripAnsi(value) {
   return value.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+function stripBlessedTags(value) {
+  return value.replace(/\{\/?[^}]+\}/g, "");
+}
+
 async function runGit(cwd, args, reject = true) {
   return execa("git", args, {
     cwd,
@@ -583,17 +587,23 @@ async function createGitPullFixture(projectName) {
 
 test("buildShortcutLine shows restart and clear logs only when available", async () => {
   const {
+    buildServiceContent,
     buildHeaderContent,
     buildShortcutLine,
+    collectProcessTreeResourceMetrics,
     computeCpuPercent,
     formatResourceMetrics,
     getSupervisorPaneLayout,
+    parseLinuxSmapsRollupPss,
+    parseProcessCpuTime,
     parseDarwinMemoryUsage,
+    parseProcessResourceRows,
   } = await import(path.join(projectRoot, "dist/lib.js"));
 
   const runningSelected = {
     branch: "main",
     command: "node server.js",
+    cpuPercent: 12,
     cwd: "/tmp",
     exitCode: null,
     group: "api",
@@ -602,6 +612,7 @@ test("buildShortcutLine shows restart and clear logs only when available", async
     lastStartedAt: null,
     lastStoppedAt: null,
     logPath: "/tmp/api.log",
+    memoryBytes: 1.5 * 1024 ** 3,
     pid: 123,
     service: "api",
     status: "running",
@@ -609,7 +620,10 @@ test("buildShortcutLine shows restart and clear logs only when available", async
 
   const stoppedSelected = {
     ...runningSelected,
+    cpuPercent: null,
+    memoryBytes: null,
     pid: null,
+    service: "worker",
     status: "stopped",
   };
 
@@ -639,7 +653,7 @@ test("buildShortcutLine shows restart and clear logs only when available", async
       ramTotalBytes: 10.8 * 1024 ** 3,
       ramUsedBytes: 5.2 * 1024 ** 3,
     }),
-    "CPU 23%  RAM 5.2GB/10.8GB",
+    "CPU 23%  RAM 5G/11G",
   );
   assert.equal(
     formatResourceMetrics({
@@ -656,6 +670,57 @@ test("buildShortcutLine shows restart and clear logs only when available", async
     ),
     80,
   );
+  const processRows = parseProcessResourceRows(
+    [
+      " 100 1 1000 0:02.40",
+      " 101 100 2000 0:03.60",
+      " 102 101 500 0:00.60",
+      " invalid row",
+      " 200 1 3000 0:01.00",
+    ].join("\n"),
+  );
+  assert.equal(parseProcessCpuTime("1-02:03:04.56"), 93784560);
+  assert.equal(
+    parseLinuxSmapsRollupPss(["Rss:               12000 kB", "Pss:                3500 kB"].join("\n")),
+    3500 * 1024,
+  );
+  assert.deepEqual(processRows, [
+    { cpuTimeMs: 2400, pid: 100, ppid: 1, rssBytes: 1000 * 1024 },
+    { cpuTimeMs: 3600, pid: 101, ppid: 100, rssBytes: 2000 * 1024 },
+    { cpuTimeMs: 600, pid: 102, ppid: 101, rssBytes: 500 * 1024 },
+    { cpuTimeMs: 1000, pid: 200, ppid: 1, rssBytes: 3000 * 1024 },
+  ]);
+  const previousProcessRows = parseProcessResourceRows(
+    [
+      " 100 1 1000 0:02.00",
+      " 101 100 2000 0:03.00",
+      " 102 101 500 0:00.50",
+      " 200 1 3000 0:00.95",
+    ].join("\n"),
+  );
+  const firstProcessMetrics = collectProcessTreeResourceMetrics(processRows, [100]);
+  assert.equal(firstProcessMetrics.get(100)?.cpuPercent, null);
+  const processMetrics = collectProcessTreeResourceMetrics(processRows, [100, 200, 999], previousProcessRows, 1000, {
+    cpuCount: 4,
+  });
+  assert.deepEqual(processMetrics.get(100), {
+    cpuPercent: 28,
+    memoryBytes: 3500 * 1024,
+  });
+  assert.deepEqual(processMetrics.get(200), {
+    cpuPercent: 1,
+    memoryBytes: 3000 * 1024,
+  });
+  assert.equal(processMetrics.has(999), false);
+  const pssProcessMetrics = collectProcessTreeResourceMetrics(processRows, [100], previousProcessRows, 1000, {
+    cpuCount: 4,
+    memoryBytesByPid: new Map([
+      [100, 800 * 1024],
+      [101, 1500 * 1024],
+      [102, 400 * 1024],
+    ]),
+  });
+  assert.equal(pssProcessMetrics.get(100)?.memoryBytes, 2700 * 1024);
   assert.deepEqual(
     parseDarwinMemoryUsage(
       [
@@ -677,14 +742,41 @@ test("buildShortcutLine shows restart and clear logs only when available", async
   const headerContent = buildHeaderContent(
     "amigo",
     "1/2 running",
-    "CPU 23%  RAM 5.2GB/10.8GB",
+    "CPU 23%  RAM 5G/11G",
     48,
   );
   assert.match(headerContent, /^\s{2}\{bold\}amigo\{\/bold\}/u);
   assert.match(headerContent, /\{cyan-fg\}1\/2 running/u);
   assert.match(headerContent, /\{green-fg\}live/u);
   assert.match(headerContent, /CPU 23%/u);
-  assert.match(headerContent, /RAM 5\.2GB/u);
+  assert.match(headerContent, /RAM 5G/u);
+
+  const serviceRender = buildServiceContent(
+    {
+      configPath: "/tmp/.devrc.yml",
+      groups: { api: ["api", "worker"] },
+      pid: 1,
+      project: "amigo",
+      rootDir: "/tmp",
+      services: {
+        api: runningSelected,
+        worker: stoppedSelected,
+      },
+      socketPath: "/tmp/dev.sock",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    "api",
+    120,
+  );
+  const serviceText = stripBlessedTags(`${serviceRender.headerContent}\n${serviceRender.content}`);
+  assert.match(serviceText, /\bMEM\b/);
+  assert.match(serviceText, /\bCPU\b/);
+  assert.match(serviceText, /2G/);
+  assert.match(serviceText, /12%/);
+  const workerLine = serviceText.split("\n").find((line) => line.includes("worker"));
+  assert.ok(workerLine);
+  assert.match(workerLine, /\s--\s+--\s+--\s*$/u);
 });
 
 test("buildTerminalLaunchCommands prioritizes the current terminal and service cwd", async () => {
@@ -887,16 +979,14 @@ test("status prints config services when supervisor is not running", async () =>
 test("status prints live supervisor state when running", async () => {
   const projectName = `dev-cli-status-live-${Date.now()}`;
   const fixtureDir = await createSupervisorFixture(projectName);
+  await runGit(fixtureDir, ["init", "--initial-branch=feature/status"]);
   const {
     clearSupervisorFiles,
-    loadProjectConfig,
     readSupervisorState,
-    saveSupervisorState,
     sendSupervisorRequest,
     SupervisorDaemon,
   } = await import(path.join(projectRoot, "dist/lib.js"));
 
-  const config = await loadProjectConfig(projectName, fixtureDir);
   const daemon = await SupervisorDaemon.create(projectName, fixtureDir);
 
   try {
@@ -918,13 +1008,8 @@ test("status prints live supervisor state when running", async () => {
     await waitFor(async () => {
       const state = await readSupervisorState(projectName);
       assert.equal(state?.services.api.status, "running");
+      assert.equal(state?.services.api.branch, "feature/status");
     });
-
-    const state = await readSupervisorState(projectName);
-    assert.ok(state);
-    state.services.api.isGit = true;
-    state.services.api.branch = "feature/status";
-    await saveSupervisorState(state);
 
     const result = await execa("node", [cliEntry, "status", projectName], {
       cwd: fixtureDir,

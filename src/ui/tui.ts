@@ -33,7 +33,7 @@ import { muted, toneTag, truncate, UI_THEME, type MessageTone } from "./theme";
 export { buildHeaderContent, getSupervisorPaneLayout, type SupervisorPaneLayout } from "./layout";
 export { buildLogViewerCommand, launchExternalLogViewer, type LogViewerCommand } from "./logs";
 export { computeCpuPercent, formatResourceMetrics, parseDarwinMemoryUsage, type CpuSnapshot, type ResourceMetrics } from "./metrics";
-export { buildShortcutLine } from "./services";
+export { buildServiceContent, buildShortcutLine, type ServiceRenderResult } from "./services";
 export { buildTerminalLaunchCommands, launchTerminal, type TerminalLaunchCommand } from "./terminal";
 
 type UiMode = "branchPrompt" | "navigate";
@@ -64,6 +64,46 @@ function formatActionMessage(response: SupervisorResponse, fallback: string): Fo
   }
 
   return { text: response.message ?? fallback, tone: "success" };
+}
+
+function buildServiceRenderKey(
+  state: SupervisorState,
+  selectedService: string | null,
+  screenWidth: number,
+  screenHeight: number,
+  logCacheVersion: number,
+): string {
+  const serviceParts: string[] = [];
+  for (const [groupName, serviceNames] of Object.entries(state.groups)) {
+    serviceParts.push(`group=${groupName}`);
+    for (const serviceName of serviceNames) {
+      const service = state.services[serviceName];
+      if (!service) {
+        serviceParts.push(`${serviceName}:missing`);
+        continue;
+      }
+
+      serviceParts.push([
+        service.service,
+        service.status,
+        service.isGit ? service.branch : "-",
+        service.pid ?? "-",
+        service.lastStartedAt ?? "-",
+        service.lastStoppedAt ?? "-",
+        service.exitCode ?? "-",
+        service.memoryBytes ?? "-",
+        service.cpuPercent ?? "-",
+      ].join(","));
+    }
+  }
+
+  return [
+    selectedService ?? "-",
+    screenWidth,
+    screenHeight,
+    logCacheVersion,
+    ...serviceParts,
+  ].join("|");
 }
 
 export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
@@ -377,13 +417,13 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
           }
           if (cacheChanged && state) {
             applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches));
-            lastRenderedSelectionKey = [
-              state.updatedAt,
-              selectedService ?? "-",
+            lastRenderedSelectionKey = buildServiceRenderKey(
+              state,
+              selectedService,
               Number(screen.width),
               Number(screen.height),
               logCacheVersion,
-            ].join(":");
+            );
           }
           if (selectedService === serviceName) {
             applyLogContent(serviceName);
@@ -463,13 +503,13 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         const selectedChanged = nextSelected !== selectedService;
         selectedService = nextSelected;
 
-        const serviceRenderKey = [
-          state.updatedAt,
-          selectedService ?? "-",
+        const serviceRenderKey = buildServiceRenderKey(
+          state,
+          selectedService,
           Number(screen.width),
           Number(screen.height),
           logCacheVersion,
-        ].join(":");
+        );
         let currentServiceRender = lastServiceRender;
         if (serviceRenderKey !== lastRenderedSelectionKey || !currentServiceRender) {
           currentServiceRender = buildServiceContent(state, selectedService, Number(screen.width), logCaches);
