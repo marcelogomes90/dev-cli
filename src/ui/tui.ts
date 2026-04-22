@@ -384,7 +384,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
 
       const service = state.services[serviceName];
       const cached = logCaches.get(serviceName);
-      const content = getDisplayLogContent(service, cached);
+      const rawContent = getDisplayLogContent(service, cached);
+      const content = rawContent.replace(/^\n+/, "");
       const follow = logPinnedToBottom ? " follow" : " paused";
       const label = ` Logs: ${service.service} / ${service.status}${follow} `;
 
