@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { loadConfigFromArg, wrapCommand } from "./helpers";
 import { ensureSupervisor } from "../core/supervisor";
 import { openSupervisorTui } from "../ui/tui";
+import { printInfo } from "../ui/output";
 
 export function registerUiCommand(program: Command): void {
   program
@@ -11,6 +12,7 @@ export function registerUiCommand(program: Command): void {
     .action(
       wrapCommand(async (project: string) => {
         const config = await loadConfigFromArg(project);
+        printInfo(`${config.project}: opening UI.`);
         await ensureSupervisor(config);
         await openSupervisorTui(config);
       }),

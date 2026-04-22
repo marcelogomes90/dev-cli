@@ -520,6 +520,78 @@ async function createStatusFixture(projectName) {
   return fixtureDir;
 }
 
+async function createInstallFixture(projectName) {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-install-"));
+  await writeFile(
+    path.join(fixtureDir, "service.js"),
+    [
+      "console.log('boot');",
+      "process.on('SIGTERM', () => {",
+      "  setTimeout(() => process.exit(0), 250);",
+      "});",
+      "setInterval(() => {}, 1000);",
+    ].join("\n"),
+  );
+  await writeFile(
+    path.join(fixtureDir, "install.js"),
+    [
+      "const fs = require('node:fs');",
+      "fs.writeFileSync('installed.txt', 'ok\\n');",
+      "console.log('installed');",
+    ].join("\n"),
+  );
+  await writeFile(
+    path.join(fixtureDir, ".devrc.yml"),
+    [
+      `project: ${projectName}`,
+      "groups:",
+      "  api:",
+      "    services: [api]",
+      "services:",
+      "  api:",
+      "    cwd: .",
+      "    command: node ./service.js",
+      "    installCommand: node ./install.js",
+      "    group: api",
+    ].join("\n"),
+  );
+
+  return fixtureDir;
+}
+
+async function createRecoverableFailedFixture(projectName) {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-failed-recover-"));
+  await writeFile(
+    path.join(fixtureDir, "service.js"),
+    [
+      "const fs = require('node:fs');",
+      "if (!fs.existsSync('failed-once')) {",
+      "  fs.writeFileSync('failed-once', '1');",
+      "  process.exit(1);",
+      "}",
+      "console.log('recovered');",
+      "process.on('SIGTERM', () => process.exit(0));",
+      "setInterval(() => {}, 1000);",
+    ].join("\n"),
+  );
+  await writeFile(
+    path.join(fixtureDir, ".devrc.yml"),
+    [
+      `project: ${projectName}`,
+      "groups:",
+      "  api:",
+      "    services: [api]",
+      "services:",
+      "  api:",
+      "    cwd: .",
+      "    command: node ./service.js",
+      "    group: api",
+    ].join("\n"),
+  );
+
+  return fixtureDir;
+}
+
 async function configureGitIdentity(cwd) {
   await runGit(cwd, ["config", "user.email", "dev-cli@example.com"]);
   await runGit(cwd, ["config", "user.name", "Dev CLI"]);
@@ -630,8 +702,9 @@ test("buildShortcutLine shows restart and clear logs only when available", async
   assert.match(buildShortcutLine(runningSelected, true), /\[r\] Restart/);
   assert.match(buildShortcutLine(runningSelected, true), /\[c\] Clear logs/);
   assert.match(buildShortcutLine(runningSelected, true), /\[t\] Terminal/);
-  assert.doesNotMatch(buildShortcutLine(runningSelected, true), /\[p\] Pull/);
-  assert.doesNotMatch(buildShortcutLine(runningSelected, true), /\[d\] Branch/);
+  assert.match(buildShortcutLine(runningSelected, true), /\[i\] Install/);
+  assert.match(buildShortcutLine(runningSelected, true), /\[p\] Pull/);
+  assert.match(buildShortcutLine(runningSelected, true), /\[d\] Branch/);
   assert.doesNotMatch(buildShortcutLine(runningSelected, false), /\[c\] Clear logs/);
   assert.doesNotMatch(buildShortcutLine(null, false), /\[t\] Terminal/);
   assert.doesNotMatch(buildShortcutLine(stoppedSelected, true), /\[r\] Restart/);
@@ -641,11 +714,11 @@ test("buildShortcutLine shows restart and clear logs only when available", async
   const layout = getSupervisorPaneLayout(100, 36);
   assert.equal(layout.servicesWidth, 100);
   assert.equal(layout.servicesTop, 4);
-  assert.equal(layout.servicesHeight, 10);
+  assert.equal(layout.servicesHeight, 13);
   assert.equal(layout.logLeft, 0);
-  assert.equal(layout.logTop, 14);
+  assert.equal(layout.logTop, 17);
   assert.equal(layout.logWidth, 100);
-  assert.equal(layout.logHeight, 18);
+  assert.equal(layout.logHeight, 15);
 
   assert.equal(
     formatResourceMetrics({
@@ -1049,7 +1122,7 @@ test("up --no-ui does not print the startup results table", async () => {
     const stdout = stripAnsi(upResult.stdout);
 
     assert.equal(upResult.exitCode, 0);
-    assert.match(stdout, /Supervisor ".*" is running\./);
+    assert.match(stdout, new RegExp(`${projectName}: 1/1 services started\\.`));
     assert.doesNotMatch(stdout, /\bRESULT\b/);
     assert.doesNotMatch(stdout, /\bStarted\b/);
   } finally {
@@ -1282,6 +1355,123 @@ test("supervisor restart stops and starts the service again", async () => {
   }
 });
 
+test("supervisor install restarts the service when it is running", async () => {
+  const projectName = `dev-cli-install-running-${Date.now()}`;
+  const fixtureDir = await createInstallFixture(projectName);
+  const {
+    clearSupervisorFiles,
+    loadProjectConfig,
+    readSupervisorState,
+    sendSupervisorRequest,
+    SupervisorDaemon,
+  } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  const config = await loadProjectConfig(projectName, fixtureDir);
+  const daemon = await SupervisorDaemon.create(projectName, fixtureDir);
+
+  try {
+    await daemon.start();
+
+    await waitFor(async () => {
+      const state = await readSupervisorState(projectName);
+      assert.ok(state);
+      await stat(state.socketPath);
+    });
+
+    const startResponse = await sendSupervisorRequest(projectName, {
+      id: `start-${Date.now()}`,
+      targets: ["api"],
+      type: "start",
+    });
+    assert.equal(startResponse.ok, true);
+
+    await waitFor(async () => {
+      const state = await readSupervisorState(projectName);
+      assert.equal(state?.services.api.status, "running");
+      assert.ok(state?.services.api.pid);
+    });
+    const beforeState = await readSupervisorState(projectName);
+    const beforePid = beforeState?.services.api.pid;
+
+    const installResponse = await sendSupervisorRequest(projectName, {
+      id: `install-${Date.now()}`,
+      targets: ["api"],
+      type: "install",
+    });
+
+    assert.equal(installResponse.ok, true);
+    assert.equal(installResponse.results?.[0]?.message, "Installed dependencies and restarted.");
+    assert.equal(await readFile(path.join(fixtureDir, "installed.txt"), "utf8"), "ok\n");
+
+    const state = await readSupervisorState(projectName);
+    assert.equal(state?.services.api.status, "running");
+    assert.ok(state?.services.api.pid);
+    assert.notEqual(state?.services.api.pid, beforePid);
+    const logContent = await readFile(state.services.api.logPath, "utf8");
+    assert.match(logContent, /\[dev-cli\] Stopping api before install\./);
+    assert.match(logContent, /installed/);
+    assert.match(logContent, /\[dev-cli\] Restarting api after install\./);
+  } finally {
+    await daemon.shutdown().catch(() => {});
+    await clearSupervisorFiles(projectName);
+  }
+});
+
+test("supervisor restart recovers a failed service", async () => {
+  const projectName = `dev-cli-failed-recover-${Date.now()}`;
+  const fixtureDir = await createRecoverableFailedFixture(projectName);
+  const {
+    clearSupervisorFiles,
+    loadProjectConfig,
+    readSupervisorState,
+    sendSupervisorRequest,
+    SupervisorDaemon,
+  } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  const config = await loadProjectConfig(projectName, fixtureDir);
+  const daemon = await SupervisorDaemon.create(projectName, fixtureDir);
+
+  try {
+    await daemon.start();
+
+    await waitFor(async () => {
+      const state = await readSupervisorState(projectName);
+      assert.ok(state);
+      await stat(state.socketPath);
+    });
+
+    const startResponse = await sendSupervisorRequest(projectName, {
+      id: `start-${Date.now()}`,
+      targets: ["api"],
+      type: "start",
+    });
+    assert.equal(startResponse.ok, true);
+
+    await waitFor(async () => {
+      const state = await readSupervisorState(projectName);
+      assert.equal(state?.services.api.status, "failed");
+      assert.equal(state?.services.api.pid, null);
+    });
+
+    const restartResponse = await sendSupervisorRequest(projectName, {
+      id: `restart-${Date.now()}`,
+      targets: ["api"],
+      type: "restart",
+    });
+
+    assert.equal(restartResponse.ok, true);
+    assert.equal(restartResponse.results?.[0]?.message, "Started");
+    await waitFor(async () => {
+      const state = await readSupervisorState(projectName);
+      assert.equal(state?.services.api.status, "running");
+      assert.ok(state?.services.api.pid);
+    });
+  } finally {
+    await daemon.shutdown().catch(() => {});
+    await clearSupervisorFiles(projectName);
+  }
+});
+
 test("supervisor clear-logs truncates the selected service log", async () => {
   const projectName = `dev-cli-clear-logs-${Date.now()}`;
   const fixtureDir = await createSupervisorFixture(projectName);
@@ -1434,7 +1624,7 @@ test("supervisor checkout-branch writes git action results to the service log", 
   }
 });
 
-test("supervisor checkout-branch fails while the service is running", async () => {
+test("supervisor checkout-branch restarts the service when it is running", async () => {
   const projectName = `dev-cli-checkout-running-${Date.now()}`;
   const { fixtureDir } = await createGitPullFixture(projectName);
   const {
@@ -1468,6 +1658,8 @@ test("supervisor checkout-branch fails while the service is running", async () =
       const state = await readSupervisorState(projectName);
       assert.equal(state?.services.api.status, "running");
     });
+    const beforeState = await readSupervisorState(projectName);
+    const beforePid = beforeState?.services.api.pid;
 
     const checkoutResponse = await sendSupervisorRequest(projectName, {
       branch: "main",
@@ -1476,17 +1668,26 @@ test("supervisor checkout-branch fails while the service is running", async () =
       type: "checkout-branch",
     });
 
-    assert.equal(checkoutResponse.ok, false);
-    assert.equal(checkoutResponse.results?.[0]?.message, "api cannot switch branch from status running.");
+    assert.equal(checkoutResponse.ok, true);
+    assert.equal(checkoutResponse.results?.[0]?.message, "Checked out main and restarted.");
+
+    const state = await readSupervisorState(projectName);
+    assert.equal(state?.services.api.status, "running");
+    assert.equal(state?.services.api.branch, "main");
+    assert.notEqual(state?.services.api.pid, beforePid);
+    const logContent = await readFile(state.services.api.logPath, "utf8");
+    assert.match(logContent, /\[dev-cli\] Stopping api before checkout\./);
+    assert.match(logContent, /\[dev-cli\] Running git checkout main\.\.\./);
+    assert.match(logContent, /\[dev-cli\] Restarting api after checkout\./);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
   }
 });
 
-test("supervisor pull-branch fails while the service is running", async () => {
+test("supervisor pull-branch restarts the service when it is running", async () => {
   const projectName = `dev-cli-pull-running-${Date.now()}`;
-  const { fixtureDir } = await createGitPullFixture(projectName);
+  const { branch, fixtureDir, serviceDir } = await createGitPullFixture(projectName);
   const {
     clearSupervisorFiles,
     loadProjectConfig,
@@ -1518,6 +1719,9 @@ test("supervisor pull-branch fails while the service is running", async () => {
       const state = await readSupervisorState(projectName);
       assert.equal(state?.services.api.status, "running");
     });
+    const beforeState = await readSupervisorState(projectName);
+    const beforePid = beforeState?.services.api.pid;
+    const beforeHead = (await runGit(serviceDir, ["rev-parse", "HEAD"])).stdout.trim();
 
     const pullResponse = await sendSupervisorRequest(projectName, {
       id: `pull-${Date.now()}`,
@@ -1525,8 +1729,20 @@ test("supervisor pull-branch fails while the service is running", async () => {
       type: "pull-branch",
     });
 
-    assert.equal(pullResponse.ok, false);
-    assert.equal(pullResponse.results?.[0]?.message, "api cannot pull from status running.");
+    assert.equal(pullResponse.ok, true);
+    assert.equal(pullResponse.results?.[0]?.message, `Pulled ${branch} with rebase and restarted.`);
+
+    const afterHead = (await runGit(serviceDir, ["rev-parse", "HEAD"])).stdout.trim();
+    assert.notEqual(afterHead, beforeHead);
+
+    const state = await readSupervisorState(projectName);
+    assert.equal(state?.services.api.status, "running");
+    assert.equal(state?.services.api.branch, branch);
+    assert.notEqual(state?.services.api.pid, beforePid);
+    const logContent = await readFile(state.services.api.logPath, "utf8");
+    assert.match(logContent, /\[dev-cli\] Stopping api before pull\./);
+    assert.match(logContent, /\[dev-cli\] Running git pull --rebase\.\.\./);
+    assert.match(logContent, /\[dev-cli\] Restarting api after pull\./);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);

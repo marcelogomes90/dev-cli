@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { loadConfigFromArg, wrapCommand } from "./helpers";
 import { parseCsvOption } from "../utils/command";
 import { triggerUpSupervisor, upSupervisor } from "../core/supervisor";
-import { printSuccess } from "../ui/output";
+import { formatSupervisorResponseSummary, printInfo, printSuccess } from "../ui/output";
 import { openSupervisorTui } from "../ui/tui";
 
 export function registerUpCommand(program: Command): void {
@@ -18,6 +18,7 @@ export function registerUpCommand(program: Command): void {
         const targets = parseCsvOption(options.only);
 
         if (options.ui !== false) {
+          printInfo(`${config.project}: starting services and opening UI.`);
           await triggerUpSupervisor(config, targets);
           await openSupervisorTui(config);
           return;
@@ -28,7 +29,7 @@ export function registerUpCommand(program: Command): void {
           throw new Error(response.message ?? "Unable to start supervisor.");
         }
 
-        printSuccess(`Supervisor "${config.project}" is running.`);
+        printSuccess(formatSupervisorResponseSummary(config.project, "services started", response));
       }),
     );
 }

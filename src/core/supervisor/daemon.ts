@@ -77,6 +77,7 @@ function setResourceMetrics(
 export class SupervisorDaemon {
   private readonly children = new Map<string, ManagedChild>();
   private readonly config: ProjectConfig;
+  private readonly expectedStops = new WeakSet<ManagedChild>();
   private readonly handleExit = () => {
     void rm(this.paths.socketPath, { force: true });
   };
@@ -436,15 +437,7 @@ export class SupervisorDaemon {
       return context;
     }
 
-    const { entry, serviceName: targetService } = context;
-    if (entry.status !== "stopped") {
-      await this.appendSupervisorLog(targetService, `${targetService} cannot switch branch from status ${entry.status}.`);
-      return {
-        service: targetService,
-        ok: false,
-        message: `${targetService} cannot switch branch from status ${entry.status}.`,
-      };
-    }
+    const { serviceName: targetService } = context;
 
     if (!targetBranch) {
       return {
@@ -459,11 +452,15 @@ export class SupervisorDaemon {
       return gitContext;
     }
 
-    return this.runGitServiceAction(
-      gitContext,
-      `Running git checkout ${targetBranch}...`,
-      () => checkoutBranch(gitContext.service.cwd, targetBranch),
-      (nextBranch) => `Checked out ${nextBranch}.`,
+    return this.runRestartableAction(
+      targetService,
+      "checkout",
+      () => this.runGitServiceAction(
+        gitContext,
+        `Running git checkout ${targetBranch}...`,
+        () => checkoutBranch(gitContext.service.cwd, targetBranch),
+        (nextBranch) => `Checked out ${nextBranch}.`,
+      ),
     );
   }
 
@@ -473,26 +470,22 @@ export class SupervisorDaemon {
       return context;
     }
 
-    const { entry, serviceName: targetService } = context;
-    if (entry.status !== "stopped") {
-      await this.appendSupervisorLog(targetService, `${targetService} cannot pull from status ${entry.status}.`);
-      return {
-        service: targetService,
-        ok: false,
-        message: `${targetService} cannot pull from status ${entry.status}.`,
-      };
-    }
+    const { serviceName: targetService } = context;
 
     const gitContext = await this.ensureGitServiceContext(context);
     if ("ok" in gitContext) {
       return gitContext;
     }
 
-    return this.runGitServiceAction(
-      gitContext,
-      "Running git pull --rebase...",
-      () => pullBranchRebase(gitContext.service.cwd),
-      (nextBranch) => `Pulled ${nextBranch} with rebase.`,
+    return this.runRestartableAction(
+      targetService,
+      "pull",
+      () => this.runGitServiceAction(
+        gitContext,
+        "Running git pull --rebase...",
+        () => pullBranchRebase(gitContext.service.cwd),
+        (nextBranch) => `Pulled ${nextBranch} with rebase.`,
+      ),
     );
   }
 
@@ -563,11 +556,12 @@ export class SupervisorDaemon {
         return;
       }
 
+      const nextStatus = this.expectedStops.has(managed) ? "stopped" : status;
       this.children.delete(serviceName);
       entry.pid = null;
       entry.exitCode = exitCode;
       entry.lastStoppedAt = new Date().toISOString();
-      entry.status = status;
+      entry.status = nextStatus;
       setResourceMetrics(entry, null, null);
       await saveSupervisorState(this.state);
     };
@@ -645,7 +639,50 @@ export class SupervisorDaemon {
     return { service: serviceName, ok: true, message: "Started" };
   }
 
-  private async installService(serviceName: string): Promise<SupervisorServiceResult> {
+  private async runRestartableAction(
+    serviceName: string,
+    actionName: string,
+    action: () => Promise<SupervisorServiceResult>,
+  ): Promise<SupervisorServiceResult> {
+    const entry = this.state.services[serviceName];
+    const shouldRestart = entry.status === "running" && entry.pid !== null && isProcessAlive(entry.pid);
+
+    if (!shouldRestart) {
+      return action();
+    }
+
+    await this.appendSupervisorLog(serviceName, `Stopping ${serviceName} before ${actionName}.`);
+    const stopResult = await this.stopService(serviceName, { preserveLog: true });
+    if (!stopResult.ok) {
+      return {
+        service: serviceName,
+        ok: false,
+        message: stopResult.message,
+      };
+    }
+
+    const actionResult = await action();
+    if (!actionResult.ok) {
+      return actionResult;
+    }
+
+    await this.appendSupervisorLog(serviceName, `Restarting ${serviceName} after ${actionName}.`);
+    const startResult = await this.startService(serviceName);
+    if (!startResult.ok) {
+      return startResult;
+    }
+
+    return {
+      service: serviceName,
+      ok: true,
+      message: `${actionResult.message.replace(/\.$/, "")} and restarted.`,
+    };
+  }
+
+  private async installService(
+    serviceName: string,
+    options: { preserveLog?: boolean } = {},
+  ): Promise<SupervisorServiceResult> {
     const entry = this.state.services[serviceName];
     const installCommand = this.config.services[serviceName].installCommand;
 
@@ -657,7 +694,33 @@ export class SupervisorDaemon {
       return { service: serviceName, ok: true, message: "Already installing" };
     }
 
-    if (isProcessAlive(entry.pid)) {
+    const shouldRestart = entry.status === "running" && entry.pid !== null && isProcessAlive(entry.pid);
+    if (shouldRestart) {
+      return this.runRestartableAction(serviceName, "install", async () => {
+        const result = await this.installService(serviceName, { preserveLog: true });
+        const managed = this.children.get(serviceName);
+        if (!result.ok || !managed) {
+          return result;
+        }
+
+        const code = await managed.closePromise.catch(() => 1);
+        if (code !== 0) {
+          return {
+            service: serviceName,
+            ok: false,
+            message: "Install failed.",
+          };
+        }
+
+        return {
+          service: serviceName,
+          ok: true,
+          message: "Installed dependencies",
+        };
+      });
+    }
+
+    if (entry.pid !== null && isProcessAlive(entry.pid)) {
       return {
         service: serviceName,
         ok: false,
@@ -669,7 +732,9 @@ export class SupervisorDaemon {
     entry.exitCode = null;
     entry.lastStoppedAt = null;
     setResourceMetrics(entry, null, null);
-    await writeFile(entry.logPath, "");
+    if (!options.preserveLog) {
+      await writeFile(entry.logPath, "");
+    }
 
     const managed = this.spawnManagedProcess(serviceName, installCommand);
     entry.pid = managed.child.pid ?? null;
@@ -685,6 +750,10 @@ export class SupervisorDaemon {
     const pid = entry.pid;
 
     if (entry.status !== "running" || !pid || !isProcessAlive(pid)) {
+      if (entry.status === "failed" || entry.status === "stopped" || entry.status === "running") {
+        return this.startService(serviceName);
+      }
+
       return {
         service: serviceName,
         ok: false,
@@ -695,7 +764,7 @@ export class SupervisorDaemon {
     entry.status = "restarting";
     await saveSupervisorState(this.state);
 
-    const stopResult = await this.stopService(serviceName);
+    const stopResult = await this.stopService(serviceName, { preserveLog: true });
     if (!stopResult.ok) {
       return {
         service: serviceName,
@@ -723,7 +792,10 @@ export class SupervisorDaemon {
     };
   }
 
-  private async stopService(serviceName: string): Promise<SupervisorServiceResult> {
+  private async stopService(
+    serviceName: string,
+    options: { preserveLog?: boolean } = {},
+  ): Promise<SupervisorServiceResult> {
     const entry = this.state.services[serviceName];
     const pid = entry.pid;
 
@@ -733,13 +805,20 @@ export class SupervisorDaemon {
       entry.status = "stopped";
       entry.lastStoppedAt = new Date().toISOString();
       setResourceMetrics(entry, null, null);
-      await writeFile(entry.logPath, "");
+      if (!options.preserveLog) {
+        await writeFile(entry.logPath, "");
+      }
       await saveSupervisorState(this.state);
       return { service: serviceName, ok: true, message: "Already stopped" };
     }
 
     entry.status = "stopping";
     await saveSupervisorState(this.state);
+
+    const managed = this.children.get(serviceName);
+    if (managed) {
+      this.expectedStops.add(managed);
+    }
 
     await terminateProcessTree(pid, "SIGTERM");
     const gracefulExit = await waitForProcessExit(pid, DEFAULT_STOP_TIMEOUT_MS);
@@ -761,7 +840,10 @@ export class SupervisorDaemon {
     entry.status = "stopped";
     entry.lastStoppedAt = new Date().toISOString();
     setResourceMetrics(entry, null, null);
-    await writeFile(entry.logPath, "");
+    if (!options.preserveLog) {
+      await writeFile(entry.logPath, "");
+    }
+    this.children.delete(serviceName);
     await saveSupervisorState(this.state);
     return { service: serviceName, ok: true, message: "Stopped" };
   }

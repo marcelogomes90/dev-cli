@@ -167,7 +167,7 @@ dev ui amigo-workspace
 
 ### `dev status <project>`
 
-Prints the current service table.
+Prints a short service summary and the current service table.
 
 ```bash
 dev status amigo-workspace
@@ -176,6 +176,7 @@ dev status amigo-workspace
 Behavior:
 
 - If the supervisor is running, status is read from live supervisor state.
+- Live status includes PID, uptime, memory, CPU, and log size columns.
 - If the supervisor is not running, a config-based table is printed with services marked as stopped.
 
 ### `dev down <project>`
@@ -185,6 +186,11 @@ Stops all services managed by the supervisor and shuts the supervisor down.
 ```bash
 dev down amigo-workspace
 ```
+
+Behavior:
+
+- Runs the `beforeDown` hook before shutdown.
+- Stops every managed service and removes the active supervisor state.
 
 ### `dev init`
 
@@ -196,8 +202,8 @@ dev init
 
 Behavior:
 
-- Runs the `beforeDown` hook before shutdown.
-- Stops every managed service and removes the active supervisor state.
+- Prompts for groups, services, commands, install commands, dependencies, and editor settings.
+- Writes `.devrc.yml` when the flow is confirmed.
 
 ## Terminal UI
 
@@ -215,9 +221,9 @@ The header shows the project name, running service count, and live CPU/RAM usage
 ### Actions
 
 - `a` or `Enter`: start the selected stopped service
-- `i`: run `installCommand` for the selected stopped service
+- `i`: run `installCommand` for the selected stopped, failed, or running service
 - `s`: stop the selected running service
-- `r`: restart the selected running service
+- `r`: restart the selected running service, or recover a failed service by starting it again
 - `c`: clear logs for the selected service when logs exist
 - `v`: open the full service log in the native terminal viewer
 - `e`: open the selected service directory in the configured editor
@@ -225,8 +231,10 @@ The header shows the project name, running service count, and live CPU/RAM usage
 
 ### Git actions
 
-- `p`: run `git pull --rebase` for a stopped git service
-- `d`: prompt for a branch name and run `git checkout` for a stopped git service
+- `p`: run `git pull --rebase` for a stopped, failed, or running git service
+- `d`: prompt for a branch name and run `git checkout` for a stopped, failed, or running git service
+
+When `install`, `pull`, or `checkout` is run for a running service, the supervisor stops the service first and restarts it after the action succeeds. The service log records the stop, action, and restart steps.
 
 ## Typical Workflow
 

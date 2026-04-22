@@ -44,7 +44,9 @@ interface FooterMessage {
 }
 
 const METRICS_REFRESH_MS = 1_000;
-const SCREEN_POLL_MS = 250;
+const SCREEN_POLL_MS = 500;
+const SCREEN_RENDER_DEBOUNCE_MS = 16;
+const BACKGROUND_LOG_REFRESH_MS = 5_000;
 
 function formatActionMessage(response: SupervisorResponse, fallback: string): FooterMessage {
   if (!response.ok) {
@@ -58,7 +60,9 @@ function formatActionMessage(response: SupervisorResponse, fallback: string): Fo
     }
 
     return {
-      text: response.results.length === 1 ? response.results[0].message : response.message ?? fallback,
+      text: response.results.length === 1
+        ? `${response.results[0].service}: ${response.results[0].message}`
+        : response.message ?? `${response.results.length}/${response.results.length} actions completed.`,
       tone: "success",
     };
   }
@@ -234,8 +238,18 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     let logPinnedToBottom = true;
     let rendering = false;
     let renderPending = false;
+    let renderTimer: NodeJS.Timeout | null = null;
     let screenClosed = false;
     let lastMetricsRefreshAt = 0;
+    let lastBackgroundLogRefreshAt = Date.now();
+    let lastFooterContent = "";
+    let lastHeaderContent = "";
+    let lastLogContent = "";
+    let lastLogLabel = "";
+    let lastPaneLayoutKey = "";
+    let lastServicesContent = "";
+    let lastServicesFrameLabel = "";
+    let lastServicesHeaderContent = "";
     let metricsRefreshPromise: Promise<void> | null = null;
     let logCacheVersion = 0;
     let previousCpuSnapshot: CpuSnapshot | null = null;
@@ -246,9 +260,36 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     };
     const logCaches = new Map<string, LogCache>();
     const logRefreshes = new Map<string, Promise<void>>();
+    const pendingServiceActions = new Map<string, string>();
 
     const setFooterMessage = (tone: MessageTone, text: string) => {
       footerMessage = { text, tone };
+    };
+
+    const requestScreenRender = (immediate = false) => {
+      if (screenClosed) {
+        return;
+      }
+
+      if (immediate) {
+        if (renderTimer) {
+          clearTimeout(renderTimer);
+          renderTimer = null;
+        }
+        screen.render();
+        return;
+      }
+
+      if (renderTimer) {
+        return;
+      }
+
+      renderTimer = setTimeout(() => {
+        renderTimer = null;
+        if (!screenClosed) {
+          screen.render();
+        }
+      }, SCREEN_RENDER_DEBOUNCE_MS);
     };
 
     const getSelectedService = (): ManagedServiceState | null => {
@@ -257,6 +298,33 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       }
 
       return state.services[selectedService] ?? null;
+    };
+
+    const getSelectedBusyAction = (): string | null => {
+      if (!selectedService) {
+        return null;
+      }
+
+      return pendingServiceActions.get(selectedService) ?? null;
+    };
+
+    const guardSelectedServiceIdle = (actionLabel: string): boolean => {
+      const selected = getSelectedService();
+      if (!selected) {
+        setFooterMessage("warning", "No service selected.");
+        void render();
+        return false;
+      }
+
+      const busyAction = pendingServiceActions.get(selected.service);
+      if (busyAction) {
+        setFooterMessage("warning", `${selected.service} is busy with ${busyAction}. Wait until it finishes before ${actionLabel}.`);
+        renderFooter();
+        requestScreenRender(true);
+        return false;
+      }
+
+      return true;
     };
 
     const selectedHasLogs = (): boolean => {
@@ -323,26 +391,48 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       return "No logs yet.";
     };
 
-    const renderFooter = () => {
+    const renderFooter = (): boolean => {
       const selected = getSelectedService();
       const promptText =
         mode === "branchPrompt" && selected
           ? `Branch for ${selected.service}: ${branchInput || ""}_`
           : footerMessage.text;
       const message = promptText;
-      const tone = footerMessage.tone;
+      const busyAction = getSelectedBusyAction();
+      const tone = busyAction ? "warning" : footerMessage.tone;
       const shortcuts =
-        mode === "branchPrompt" ? "" : buildShortcutLine(selected, selectedHasLogs());
+        mode === "branchPrompt"
+          ? ""
+          : busyAction
+            ? `[↑/↓ j/k] Move | ${selected?.service} busy: ${busyAction} | [v] View logs | [q] Quit`
+            : buildShortcutLine(selected, selectedHasLogs());
       const footerInset = Number(screen.width) > 48 ? 2 : 1;
       const inset = " ".repeat(footerInset);
       const availableWidth = Math.max(Number(screen.width) - 2 - footerInset * 2, 10);
-      footer.setContent(
-        `${inset}{${toneTag(tone)}}${truncate(message, availableWidth).trimEnd()}{/${toneTag(tone)}}\n${inset}${muted(truncate(shortcuts, availableWidth).trimEnd())}`,
-      );
+      const content = `${inset}{${toneTag(tone)}}${truncate(message, availableWidth).trimEnd()}{/${toneTag(tone)}}\n${inset}${muted(truncate(shortcuts, availableWidth).trimEnd())}`;
+      if (content === lastFooterContent) {
+        return false;
+      }
+
+      footer.setContent(content);
+      lastFooterContent = content;
+      return true;
     };
 
-    const applyPaneLayout = () => {
+    const applyPaneLayout = (): boolean => {
       const paneLayout = getSupervisorPaneLayout(Number(screen.width), Number(screen.height));
+      const paneLayoutKey = [
+        paneLayout.logHeight,
+        paneLayout.logTop,
+        paneLayout.logWidth,
+        paneLayout.servicesHeight,
+        paneLayout.servicesTop,
+        paneLayout.servicesWidth,
+      ].join(":");
+      if (paneLayoutKey === lastPaneLayoutKey) {
+        return false;
+      }
+
       servicesFrameBox.top = paneLayout.servicesTop;
       servicesFrameBox.left = 0;
       servicesFrameBox.width = paneLayout.servicesWidth;
@@ -358,13 +448,20 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       logBox.left = paneLayout.logLeft;
       logBox.width = paneLayout.logWidth;
       logBox.height = paneLayout.logHeight;
+      lastPaneLayoutKey = paneLayoutKey;
+      return true;
     };
 
-    const renderHeader = (serviceSummary: string) => {
+    const renderHeader = (serviceSummary: string): boolean => {
       const metricsText = formatResourceMetrics(resourceMetrics);
-      header.setContent(
-        buildHeaderContent(config.project, serviceSummary, metricsText, Number(screen.width)),
-      );
+      const content = buildHeaderContent(config.project, serviceSummary, metricsText, Number(screen.width));
+      if (content === lastHeaderContent) {
+        return false;
+      }
+
+      header.setContent(content);
+      lastHeaderContent = content;
+      return true;
     };
 
     const centerInLogBox = (text: string): string => {
@@ -375,22 +472,45 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       return "\n".repeat(vertPad) + " ".repeat(horizPad) + muted(text);
     };
 
-    const applyLogContent = (serviceName: string | null) => {
+    const applyLogContent = (serviceName: string | null): boolean => {
       if (!serviceName || !state?.services[serviceName]) {
-        logBox.setLabel(" Logs ");
-        logBox.setContent(centerInLogBox("No service selected."));
-        return;
+        const label = " Logs ";
+        const content = centerInLogBox("No service selected.");
+        const changed = label !== lastLogLabel || content !== lastLogContent;
+        if (changed) {
+          logBox.setLabel(label);
+          logBox.setContent(content);
+          lastLogLabel = label;
+          lastLogContent = content;
+        }
+        return changed;
       }
 
       const service = state.services[serviceName];
       const cached = logCaches.get(serviceName);
-      const rawContent = getDisplayLogContent(service, cached);
+      const isActive =
+        service.status === "running" ||
+        service.status === "restarting" ||
+        service.status === "starting" ||
+        service.status === "installing";
+      const rawContent = !cached && isActive
+        ? "Loading logs..."
+        : getDisplayLogContent(service, cached);
       const content = rawContent.replace(/^\n+/, "");
       const follow = logPinnedToBottom ? " follow" : " paused";
       const label = ` Logs: ${service.service} / ${service.status}${follow} `;
+      const renderedContent =
+        content === "No logs yet." || content === "Loading logs..."
+          ? centerInLogBox(content)
+          : content;
+      const changed = label !== lastLogLabel || renderedContent !== lastLogContent;
 
-      logBox.setLabel(label);
-      logBox.setContent(content === "No logs yet." ? centerInLogBox("No logs yet.") : content);
+      if (changed) {
+        logBox.setLabel(label);
+        logBox.setContent(renderedContent);
+        lastLogLabel = label;
+        lastLogContent = renderedContent;
+      }
 
       const contentLines = content.split("\n").length;
       const boxVisibleLines = Math.max(1, (Number(logBox.height) || 10) - 2);
@@ -400,9 +520,11 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       } else if (logPinnedToBottom) {
         logBox.setScrollPerc(100);
       }
+
+      return changed;
     };
 
-    const refreshLogCache = (serviceName: string) => {
+    const refreshLogCache = (serviceName: string, immediate = false) => {
       if (!state?.services[serviceName] || logRefreshes.has(serviceName)) {
         return;
       }
@@ -412,12 +534,13 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       const refresh = readLogTail(service.logPath, previousCache, LOG_TAIL_LINES)
         .then((cache) => {
           const cacheChanged = cache !== previousCache;
+          let dirty = false;
           logCaches.set(serviceName, cache);
           if (cacheChanged) {
             logCacheVersion += 1;
           }
           if (cacheChanged && state) {
-            applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches));
+            dirty = applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches)) || dirty;
             lastRenderedSelectionKey = buildServiceRenderKey(
               state,
               selectedService,
@@ -427,9 +550,12 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
             );
           }
           if (selectedService === serviceName) {
-            applyLogContent(serviceName);
-            renderFooter();
-            screen.render();
+            dirty = applyLogContent(serviceName) || dirty;
+            dirty = renderFooter() || dirty;
+          }
+
+          if (dirty) {
+            requestScreenRender(immediate);
           }
         })
         .finally(() => {
@@ -439,34 +565,75 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       logRefreshes.set(serviceName, refresh);
     };
 
-    const warmLogCaches = () => {
-      for (const serviceName of serviceNames) {
-        refreshLogCache(serviceName);
+    const refreshLogCaches = (priorityService: string | null) => {
+      if (priorityService) {
+        refreshLogCache(priorityService);
       }
-    };
 
-    const ensureSelectedVisible = (selectedLine: number) => {
-      const visibleHeight = Math.max(Number(servicesBox.height) || 1, 1);
-      const currentScroll = servicesBox.getScroll();
-
-      if (selectedLine <= currentScroll) {
-        servicesBox.setScroll(Math.max(selectedLine - 1, 0));
+      const now = Date.now();
+      if (now - lastBackgroundLogRefreshAt < BACKGROUND_LOG_REFRESH_MS) {
         return;
       }
 
-      if (selectedLine >= currentScroll + visibleHeight - 1) {
-        servicesBox.setScroll(Math.max(selectedLine - visibleHeight + 2, 0));
+      lastBackgroundLogRefreshAt = now;
+      for (const serviceName of serviceNames) {
+        if (serviceName !== priorityService) {
+          refreshLogCache(serviceName);
+        }
       }
     };
 
-    const applyServiceRender = (serviceRender: ServiceRenderResult) => {
+    const ensureSelectedVisible = (selectedLine: number): boolean => {
+      const visibleHeight = Math.max(Number(servicesBox.height) || 1, 1);
+      const currentScroll = servicesBox.getScroll();
+
+      if (selectedLine < currentScroll) {
+        const nextScroll = Math.max(selectedLine - 1, 0);
+        if (nextScroll === currentScroll) {
+          return false;
+        }
+
+        servicesBox.setScroll(nextScroll);
+        return true;
+      }
+
+      if (selectedLine > currentScroll + visibleHeight - 1) {
+        const nextScroll = Math.max(selectedLine - visibleHeight + 2, 0);
+        if (nextScroll === currentScroll) {
+          return false;
+        }
+
+        servicesBox.setScroll(nextScroll);
+        return true;
+      }
+
+      return false;
+    };
+
+    const applyServiceRender = (serviceRender: ServiceRenderResult): boolean => {
       lastServiceRender = serviceRender;
       serviceNames = serviceRender.serviceNames;
       const failedText = serviceRender.failedCount > 0 ? ` / ${serviceRender.failedCount} failed` : "";
-      servicesFrameBox.setLabel(` Services ${serviceRender.runningCount}/${serviceRender.totalServices} running${failedText} `);
-      servicesHeaderBox.setContent(serviceRender.headerContent);
-      servicesBox.setContent(serviceRender.content);
-      ensureSelectedVisible(serviceRender.selectedLine);
+      const frameLabel = ` Services ${serviceRender.runningCount}/${serviceRender.totalServices} running${failedText} `;
+      let changed = false;
+
+      if (frameLabel !== lastServicesFrameLabel) {
+        servicesFrameBox.setLabel(frameLabel);
+        lastServicesFrameLabel = frameLabel;
+        changed = true;
+      }
+      if (serviceRender.headerContent !== lastServicesHeaderContent) {
+        servicesHeaderBox.setContent(serviceRender.headerContent);
+        lastServicesHeaderContent = serviceRender.headerContent;
+        changed = true;
+      }
+      if (serviceRender.content !== lastServicesContent) {
+        servicesBox.setContent(serviceRender.content);
+        lastServicesContent = serviceRender.content;
+        changed = true;
+      }
+
+      return ensureSelectedVisible(serviceRender.selectedLine) || changed;
     };
 
     const render = async () => {
@@ -477,23 +644,28 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
 
       rendering = true;
       try {
-        applyPaneLayout();
+        let dirty = applyPaneLayout();
         refreshResourceMetrics();
         state = await readSupervisorState(config.project);
         if (!state) {
           header.show();
           footer.show();
-          renderHeader("Supervisor is not running.");
+          dirty = renderHeader("Supervisor is not running.") || dirty;
           lastServiceRender = null;
           servicesHeaderBox.setContent("");
           servicesBox.setContent("");
+          lastServicesHeaderContent = "";
+          lastServicesContent = "";
           servicesFrameBox.hide();
           servicesHeaderBox.hide();
           servicesBox.hide();
           logBox.hide();
           logBox.setContent("Supervisor is not running.");
-          renderFooter();
-          screen.render();
+          lastLogContent = "Supervisor is not running.";
+          dirty = renderFooter() || dirty;
+          if (dirty) {
+            requestScreenRender();
+          }
           return;
         }
 
@@ -514,23 +686,23 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         let currentServiceRender = lastServiceRender;
         if (serviceRenderKey !== lastRenderedSelectionKey || !currentServiceRender) {
           currentServiceRender = buildServiceContent(state, selectedService, Number(screen.width), logCaches);
-          applyServiceRender(currentServiceRender);
+          dirty = applyServiceRender(currentServiceRender) || dirty;
           lastRenderedSelectionKey = serviceRenderKey;
         }
 
         const failedSummary = currentServiceRender.failedCount > 0 ? ` - ${currentServiceRender.failedCount} failed` : "";
         const serviceSummary = `${currentServiceRender.runningCount}/${currentServiceRender.totalServices} running${failedSummary}`;
-        renderHeader(serviceSummary);
+        dirty = renderHeader(serviceSummary) || dirty;
 
         const selected = getSelectedService();
         if (!selected) {
-          applyLogContent(null);
+          dirty = applyLogContent(null) || dirty;
         } else {
           if (selectedChanged) {
             logPinnedToBottom = true;
           }
 
-          applyLogContent(selected.service);
+          dirty = applyLogContent(selected.service) || dirty;
         }
 
         header.show();
@@ -540,9 +712,11 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         servicesBox.show();
         logBox.show();
 
-        warmLogCaches();
-        renderFooter();
-        screen.render();
+        refreshLogCaches(selected?.service ?? null);
+        dirty = renderFooter() || dirty;
+        if (dirty) {
+          requestScreenRender();
+        }
       } finally {
         rendering = false;
         if (renderPending) {
@@ -561,18 +735,24 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       const nextIndex = Math.min(Math.max(currentIndex + direction, 0), serviceNames.length - 1);
       selectedService = serviceNames[nextIndex] ?? selectedService;
       if (state) {
-        applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches));
-        applyLogContent(selectedService);
+        logPinnedToBottom = true;
+        let dirty = applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches));
+        dirty = applyLogContent(selectedService) || dirty;
         if (selectedService) {
-          refreshLogCache(selectedService);
+          refreshLogCache(selectedService, true);
         }
-        renderFooter();
-        screen.render();
+        dirty = renderFooter() || dirty;
+        if (dirty) {
+          requestScreenRender(true);
+        }
       }
-      void render();
     };
 
     const startBranchPrompt = () => {
+      if (!guardSelectedServiceIdle("switching branch")) {
+        return;
+      }
+
       const selected = getSelectedService();
       if (!selected?.isGit) {
         setFooterMessage("warning", "Selected service is not a git repository.");
@@ -580,7 +760,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return;
       }
 
-      if (selected.status !== "stopped") {
+      if (selected.status !== "stopped" && selected.status !== "failed" && selected.status !== "running") {
         setFooterMessage("warning", `${selected.service} cannot switch branch from status ${selected.status}.`);
         void render();
         return;
@@ -590,10 +770,14 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       branchInput = "";
       setFooterMessage("info", `Branch for ${selected.service}:`);
       renderFooter();
-      screen.render();
+      requestScreenRender();
     };
 
     const pullSelectedBranch = async () => {
+      if (!guardSelectedServiceIdle("pulling")) {
+        return;
+      }
+
       const selected = getSelectedService();
       if (!selected) {
         setFooterMessage("warning", "No service selected.");
@@ -607,13 +791,13 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return;
       }
 
-      if (selected.status !== "stopped") {
+      if (selected.status !== "stopped" && selected.status !== "failed" && selected.status !== "running") {
         setFooterMessage("warning", `${selected.service} cannot pull from status ${selected.status}.`);
         void render();
         return;
       }
 
-      await runAction(async () => {
+      await runServiceAction(selected.service, "pull", async () => {
         const response = await pullSupervisorBranch(config, selected.service);
         const selectedResult = response.results?.find((result) => result.service === selected.service);
         if (selectedResult?.ok && state?.services[selected.service]) {
@@ -630,7 +814,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       mode = "navigate";
       setFooterMessage("info", "Branch change cancelled.");
       renderFooter();
-      screen.render();
+      requestScreenRender();
     };
 
     const openLogInPager = () => {
@@ -676,7 +860,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     const scrollLogs = (offset: number) => {
       logBox.scroll(offset);
       logPinnedToBottom = logBox.getScrollPerc() >= 98;
-      screen.render();
+      requestScreenRender();
     };
 
     const runAction = async (action: () => Promise<SupervisorResponse>, fallback: string) => {
@@ -691,9 +875,52 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       void render();
     };
 
+    const runServiceAction = async (
+      serviceName: string,
+      actionName: string,
+      action: () => Promise<SupervisorResponse>,
+      fallback: string,
+    ) => {
+      if (pendingServiceActions.has(serviceName)) {
+        setFooterMessage("warning", `${serviceName} is busy with ${pendingServiceActions.get(serviceName)}.`);
+        renderFooter();
+        requestScreenRender(true);
+        return;
+      }
+
+      pendingServiceActions.set(serviceName, actionName);
+      if (state?.services[serviceName]) {
+        if (actionName === "install") {
+          state.services[serviceName].status = "installing";
+        } else if (actionName === "pull" || actionName === "checkout" || actionName === "restart") {
+          state.services[serviceName].status = "restarting";
+        } else if (actionName === "start") {
+          state.services[serviceName].status = "starting";
+        } else if (actionName === "stop") {
+          state.services[serviceName].status = "stopping";
+        }
+        applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches));
+        applyLogContent(selectedService);
+      }
+      renderFooter();
+      requestScreenRender(true);
+
+      try {
+        await runAction(action, fallback);
+      } finally {
+        pendingServiceActions.delete(serviceName);
+        renderFooter();
+        requestScreenRender(true);
+      }
+    };
+
     const runSelectedServiceAction = async (
       action: "clear-logs" | "install" | "restart" | "start" | "stop",
     ) => {
+      if (!guardSelectedServiceIdle(action)) {
+        return;
+      }
+
       const selected = getSelectedService();
       if (!selected) {
         setFooterMessage("warning", "No service selected.");
@@ -713,19 +940,24 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return;
       }
 
-      if (action === "install" && selected.status !== "stopped" && selected.status !== "failed") {
+      if (
+        action === "install" &&
+        selected.status !== "stopped" &&
+        selected.status !== "failed" &&
+        selected.status !== "running"
+      ) {
         setFooterMessage("warning", `${selected.service} cannot install from status ${selected.status}.`);
         void render();
         return;
       }
 
-      if (action === "restart" && selected.status !== "running") {
+      if (action === "restart" && selected.status !== "running" && selected.status !== "failed") {
         setFooterMessage("warning", `${selected.service} cannot restart from status ${selected.status}.`);
         void render();
         return;
       }
 
-      if (action === "stop" && selected.status !== "running" && selected.status !== "starting") {
+      if (action === "stop" && selected.status !== "running" && selected.status !== "starting" && selected.status !== "failed") {
         setFooterMessage("warning", `${selected.service} cannot be stopped from status ${selected.status}.`);
         void render();
         return;
@@ -747,7 +979,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
             : action === "clear-logs"
               ? `Clear logs for ${selected.service}`
               : `Stop ${selected.service}`;
-      await runAction(async () => {
+      await runServiceAction(selected.service, action, async () => {
         const response = await controlSupervisor(config, action, [selected.service]);
         const selectedResult = response.results?.find((result) => result.service === selected.service);
         if (selectedResult?.ok && state?.services[selected.service]) {
@@ -802,6 +1034,14 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return;
       }
 
+      if (pendingServiceActions.has(selected.service)) {
+        branchInput = "";
+        mode = "navigate";
+        setFooterMessage("warning", `${selected.service} is busy with ${pendingServiceActions.get(selected.service)}.`);
+        void render();
+        return;
+      }
+
       if (!selected.isGit) {
         branchInput = "";
         setFooterMessage("warning", `${selected.service} is not a git repository.`);
@@ -813,13 +1053,13 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       if (!targetBranch) {
         setFooterMessage("warning", "Branch name is required.");
         renderFooter();
-        screen.render();
+        requestScreenRender();
         return;
       }
 
       branchInput = "";
       mode = "navigate";
-      await runAction(async () => {
+      await runServiceAction(selected.service, "checkout", async () => {
         const response = await checkoutSupervisorBranch(config, selected.service, targetBranch);
         if (response.ok && state?.services[selected.service]) {
           state.services[selected.service].branch = targetBranch;
@@ -874,7 +1114,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       }
       logPinnedToBottom = false;
       logBox.setScroll(0);
-      screen.render();
+      requestScreenRender();
     });
     screen.key(["end"], () => {
       if (mode === "branchPrompt") {
@@ -882,7 +1122,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       }
       logPinnedToBottom = true;
       logBox.setScrollPerc(100);
-      screen.render();
+      requestScreenRender();
     });
     screen.key(["v"], () => {
       if (mode === "branchPrompt") {
@@ -943,12 +1183,12 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
             : `Failed to open editor: ${err.message}`;
         setFooterMessage("error", msg);
         renderFooter();
-        screen.render();
+        requestScreenRender();
       });
       child.unref();
-      setFooterMessage("info", `Opening ${service.cwd} in ${editor}…`);
+      setFooterMessage("info", `Opening ${service.cwd} in ${editor}...`);
       renderFooter();
-      screen.render();
+      requestScreenRender();
     });
     screen.key(["t"], () => {
       if (mode === "navigate") {
@@ -987,7 +1227,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       if (key.name === "backspace") {
         branchInput = branchInput.slice(0, -1);
         renderFooter();
-        screen.render();
+        requestScreenRender();
         return;
       }
 
@@ -998,7 +1238,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       if (ch && !key.ctrl && !key.meta) {
         branchInput += ch;
         renderFooter();
-        screen.render();
+        requestScreenRender();
       }
     });
     screen.on("resize", () => {
@@ -1011,6 +1251,10 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
 
     screen.on("destroy", () => {
       screenClosed = true;
+      if (renderTimer) {
+        clearTimeout(renderTimer);
+        renderTimer = null;
+      }
       clearInterval(interval);
     });
 

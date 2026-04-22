@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { readSupervisorState } from "../core/supervisor";
-import { buildStatusRowsFromConfig, buildStatusRowsFromState, renderTable, STATUS_TABLE_HEAD } from "../ui/output";
+import { buildStatusTableFromConfig, buildStatusTableFromState, printInfo, renderTable } from "../ui/output";
 import { loadConfigFromArg, wrapCommand } from "./helpers";
 
 export function registerStatusCommand(program: Command): void {
@@ -12,9 +12,12 @@ export function registerStatusCommand(program: Command): void {
       wrapCommand(async (project: string) => {
         const config = await loadConfigFromArg(project);
         const state = await readSupervisorState(config.project);
-        const rows = state ? buildStatusRowsFromState(state) : buildStatusRowsFromConfig(config);
+        const table = state
+          ? await buildStatusTableFromState(state)
+          : buildStatusTableFromConfig(config);
 
-        renderTable(STATUS_TABLE_HEAD, rows);
+        printInfo(table.summary);
+        renderTable(table.head, table.rows);
       }),
     );
 }

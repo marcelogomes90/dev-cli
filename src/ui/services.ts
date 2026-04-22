@@ -218,12 +218,22 @@ export function buildServiceContent(
 
 export function buildShortcutLine(selected: ManagedServiceState | null, hasLogs = false): string {
   const shortcuts = ["[↑/↓ j/k] Move"];
+  const canInstall = selected?.installCommand && (
+    selected.status === "stopped" ||
+    selected.status === "failed" ||
+    selected.status === "running"
+  );
+  const canUseGit = selected?.isGit && (
+    selected.status === "stopped" ||
+    selected.status === "failed" ||
+    selected.status === "running"
+  );
 
   if (selected && (selected.status === "stopped" || selected.status === "failed")) {
     shortcuts.push("[a] Start");
   }
 
-  if (selected?.installCommand && (selected.status === "stopped" || selected.status === "failed")) {
+  if (canInstall) {
     shortcuts.push("[i] Install");
   }
 
@@ -235,11 +245,11 @@ export function buildShortcutLine(selected: ManagedServiceState | null, hasLogs 
     shortcuts.push("[r] Restart");
   }
 
-  if (selected?.isGit && selected.status === "stopped") {
+  if (canUseGit) {
     shortcuts.push("[p] Pull");
   }
 
-  if (selected?.isGit && selected.status === "stopped") {
+  if (canUseGit) {
     shortcuts.push("[d] Branch");
   }
 

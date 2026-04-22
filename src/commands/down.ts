@@ -15,7 +15,7 @@ export function registerDownCommand(program: Command): void {
         if (!response.ok) {
           throw new Error(response.message ?? "Unable to stop supervisor.");
         }
-        printSuccess(`Supervisor "${config.project}" stopped.`);
+        printSuccess(`${config.project}: stopped.`);
       }),
     );
 }

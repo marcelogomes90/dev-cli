@@ -23,7 +23,7 @@ export function registerInitCommand(program: Command): void {
             return;
           }
 
-          printSuccess(`Created ${result.configPath}.`);
+          printSuccess(`Created ${result.configPath} for ${result.project}.`);
         } finally {
           prompter.close();
         }
