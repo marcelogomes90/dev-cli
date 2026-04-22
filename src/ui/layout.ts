@@ -26,7 +26,7 @@ export function getSupervisorPaneLayout(screenWidth: number, screenHeight = 32):
   const height = Math.max(Math.floor(screenHeight), HEADER_HEIGHT + FOOTER_HEIGHT + 2);
   const bodyHeight = getBodyHeight(height);
   const logMinimumHeight = bodyHeight >= 10 ? 5 : 1;
-  const preferredServicesHeight = Math.round(bodyHeight * 0.45);
+  const preferredServicesHeight = Math.round(bodyHeight * 0.40);
   const servicesHeight = Math.min(
     Math.max(preferredServicesHeight, SERVICES_MIN_HEIGHT),
     SERVICES_MAX_HEIGHT,

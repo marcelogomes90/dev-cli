@@ -11,7 +11,7 @@ export function createCli(): Command {
   program
     .name("dev")
     .description("Declarative local environment orchestration")
-    .version("1.0.4");
+    .version("1.0.5");
 
   registerInitCommand(program);
   registerUpCommand(program);
