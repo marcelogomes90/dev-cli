@@ -133,6 +133,10 @@ async function loadLiveSupervisorState(project: string): Promise<SupervisorState
   return null;
 }
 
+export async function isSupervisorRunning(project: string): Promise<boolean> {
+  return (await loadLiveSupervisorState(project)) !== null;
+}
+
 export async function ensureSupervisor(config: ProjectConfig): Promise<void> {
   const existing = await loadLiveSupervisorState(config.project);
   if (existing) {

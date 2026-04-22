@@ -46,7 +46,7 @@ interface FooterMessage {
 const METRICS_REFRESH_MS = 1_000;
 const SCREEN_POLL_MS = 500;
 const SCREEN_RENDER_DEBOUNCE_MS = 16;
-const BACKGROUND_LOG_REFRESH_MS = 5_000;
+const BACKGROUND_LOG_REFRESH_MS = 2_000;
 
 function formatActionMessage(response: SupervisorResponse, fallback: string): FooterMessage {
   if (!response.ok) {
@@ -106,6 +106,7 @@ function buildServiceRenderKey(
     screenWidth,
     screenHeight,
     logCacheVersion,
+    Math.floor(Date.now() / 1000),
     ...serviceParts,
   ].join("|");
 }
@@ -260,6 +261,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     };
     const logCaches = new Map<string, LogCache>();
     const logRefreshes = new Map<string, Promise<void>>();
+    const pendingRefreshes = new Set<string>();
     const pendingServiceActions = new Map<string, string>();
 
     const setFooterMessage = (tone: MessageTone, text: string) => {
@@ -524,11 +526,17 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       return changed;
     };
 
-    const refreshLogCache = (serviceName: string, immediate = false) => {
-      if (!state?.services[serviceName] || logRefreshes.has(serviceName)) {
+    const refreshLogCache = (serviceName: string) => {
+      if (!state?.services[serviceName]) {
         return;
       }
 
+      if (logRefreshes.has(serviceName)) {
+        pendingRefreshes.add(serviceName);
+        return;
+      }
+
+      pendingRefreshes.delete(serviceName);
       const service = state.services[serviceName];
       const previousCache = logCaches.get(serviceName) ?? null;
       const refresh = readLogTail(service.logPath, previousCache, LOG_TAIL_LINES)
@@ -555,11 +563,15 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
           }
 
           if (dirty) {
-            requestScreenRender(immediate);
+            requestScreenRender(false);
           }
         })
         .finally(() => {
           logRefreshes.delete(serviceName);
+          if (pendingRefreshes.has(serviceName)) {
+            pendingRefreshes.delete(serviceName);
+            refreshLogCache(serviceName);
+          }
         });
 
       logRefreshes.set(serviceName, refresh);
@@ -739,7 +751,14 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         let dirty = applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches));
         dirty = applyLogContent(selectedService) || dirty;
         if (selectedService) {
-          refreshLogCache(selectedService, true);
+          refreshLogCache(selectedService);
+          for (let i = 1; i <= 2; i++) {
+            const prefetchIndex = nextIndex + direction * i;
+            if (prefetchIndex >= 0 && prefetchIndex < serviceNames.length) {
+              const prefetchService = serviceNames[prefetchIndex];
+              if (prefetchService) refreshLogCache(prefetchService);
+            }
+          }
         }
         dirty = renderFooter() || dirty;
         if (dirty) {

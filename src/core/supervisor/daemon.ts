@@ -764,6 +764,7 @@ export class SupervisorDaemon {
     entry.status = "restarting";
     await saveSupervisorState(this.state);
 
+    await this.appendSupervisorLog(serviceName, `Restarting ${serviceName}...`);
     const stopResult = await this.stopService(serviceName, { preserveLog: true });
     if (!stopResult.ok) {
       return {
@@ -785,6 +786,7 @@ export class SupervisorDaemon {
       };
     }
 
+    await this.appendSupervisorLog(serviceName, "Service started.");
     return {
       service: serviceName,
       ok: true,

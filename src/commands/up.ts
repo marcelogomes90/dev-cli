@@ -1,8 +1,8 @@
 import { Command } from "commander";
 import { loadConfigFromArg, wrapCommand } from "./helpers";
 import { parseCsvOption } from "../utils/command";
-import { triggerUpSupervisor, upSupervisor } from "../core/supervisor";
-import { formatSupervisorResponseSummary, printInfo, printSuccess } from "../ui/output";
+import { isSupervisorRunning, triggerUpSupervisor, upSupervisor } from "../core/supervisor";
+import { formatSupervisorResponseSummary, printInfo, printSuccess, printWarning } from "../ui/output";
 import { openSupervisorTui } from "../ui/tui";
 
 export function registerUpCommand(program: Command): void {
@@ -16,6 +16,11 @@ export function registerUpCommand(program: Command): void {
       wrapCommand(async (project: string, options: { only?: string; ui?: boolean }) => {
         const config = await loadConfigFromArg(project);
         const targets = parseCsvOption(options.only);
+
+        if (await isSupervisorRunning(config.project)) {
+          printWarning(`"${config.project}" already has an active session. Use "ui" to open the interface or "down" to stop it.`);
+          return;
+        }
 
         if (options.ui !== false) {
           printInfo(`${config.project}: starting services and opening UI.`);
