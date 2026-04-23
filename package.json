@@ -1,6 +1,6 @@
 {
   "name": "dev-cli",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Declarative local environment orchestration CLI",
   "license": "MIT",
   "type": "module",
@@ -18,7 +18,7 @@
     "test": "yarn build && node --test test/*.test.mjs"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.14.0"
   },
   "dependencies": {
     "blessed": "^0.1.81",
