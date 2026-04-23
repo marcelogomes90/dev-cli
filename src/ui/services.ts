@@ -13,7 +13,7 @@ export interface ServiceRenderResult {
   totalServices: number;
 }
 
-function colorStatus(status: ManagedServiceState["status"], value: string): string {
+function colorStatusIndicator(status: ManagedServiceState["status"], value: string): string {
   switch (status) {
     case "running":
       return fg(UI_THEME.steady, value);
@@ -44,8 +44,12 @@ function statusDot(status: ManagedServiceState["status"]): string {
   }
 }
 
-function formatStatus(status: ManagedServiceState["status"], width: number): string {
-  return colorStatus(status, truncate(`${statusDot(status)} ${status.toUpperCase()}`, width));
+function formatStatus(status: ManagedServiceState["status"], width: number, textColor: string = UI_THEME.text): string {
+  const text = truncate(`${statusDot(status)} ${status.toUpperCase()}`, width);
+  const indicator = colorStatusIndicator(status, text.slice(0, 1));
+  const label = fg(textColor, text.slice(1));
+
+  return `${indicator}${label}`;
 }
 
 function formatRelativeAge(value: string | null, now = Date.now()): string {
@@ -183,7 +187,7 @@ export function buildServiceContent(
       const marker = isSelected ? fg(UI_THEME.accent, "> ") : "  ";
       const name = fg(rowColor, truncate(service.service, serviceWidth));
       const group = fg(rowColor, truncate(groupName, groupWidth));
-      const status = formatStatus(service.status, statusWidth);
+      const status = formatStatus(service.status, statusWidth, rowColor);
       const branch = fg(rowColor, truncate(service.isGit ? service.branch : "-", branchWidth));
       const pid = fg(rowColor, formatServicePid(service, pidWidth));
       const uptime = fg(rowColor, formatServiceUptime(service, uptimeWidth, now));

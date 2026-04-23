@@ -188,7 +188,6 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       height: initialPaneLayout.logHeight,
       border: "line",
       label: " Logs ",
-      padding: { left: 2 },
       tags: true,
       mouse: true,
       scrollable: true,

@@ -714,11 +714,11 @@ test("buildShortcutLine shows restart and clear logs only when available", async
   const layout = getSupervisorPaneLayout(100, 36);
   assert.equal(layout.servicesWidth, 100);
   assert.equal(layout.servicesTop, 4);
-  assert.equal(layout.servicesHeight, 13);
+  assert.equal(layout.servicesHeight, 11);
   assert.equal(layout.logLeft, 0);
-  assert.equal(layout.logTop, 17);
+  assert.equal(layout.logTop, 15);
   assert.equal(layout.logWidth, 100);
-  assert.equal(layout.logHeight, 15);
+  assert.equal(layout.logHeight, 17);
 
   assert.equal(
     formatResourceMetrics({
@@ -843,6 +843,8 @@ test("buildShortcutLine shows restart and clear logs only when available", async
     120,
   );
   const serviceText = stripBlessedTags(`${serviceRender.headerContent}\n${serviceRender.content}`);
+  assert.match(serviceRender.content, /\{green-fg\}●\{\/green-fg\}\{cyan-fg\} RUNNING/u);
+  assert.doesNotMatch(serviceRender.content, /\{green-fg\}● RUNNING/u);
   assert.match(serviceText, /\bMEM\b/);
   assert.match(serviceText, /\bCPU\b/);
   assert.match(serviceText, /2G/);
