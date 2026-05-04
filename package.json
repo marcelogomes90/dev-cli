@@ -21,10 +21,12 @@
     "node": ">=20.14.0"
   },
   "dependencies": {
+    "@xterm/headless": "^6.0.0",
     "blessed": "^0.1.81",
     "cli-table3": "^0.6.5",
     "commander": "^14.0.1",
     "execa": "^9.6.0",
+    "node-pty": "^1.1.0",
     "picocolors": "^1.1.1",
     "yaml": "^2.8.1",
     "zod": "^4.1.12"

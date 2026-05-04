@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { execa } from "execa";
 
 const projectRoot = process.cwd();
@@ -854,65 +854,102 @@ test("buildShortcutLine shows restart and clear logs only when available", async
   assert.match(workerLine, /\s--\s+--\s+--\s*$/u);
 });
 
-test("buildTerminalLaunchCommands prioritizes the current terminal and service cwd", async () => {
-  const { buildTerminalLaunchCommands } = await import(path.join(projectRoot, "dist/lib.js"));
-  const cwd = "/tmp/my service/quote'path";
+test("embedded terminal helpers resolve shell, layout, and close confirmation", async () => {
+  const {
+    buildEmbeddedTerminalContent,
+    calculateEmbeddedTerminalLayout,
+    ensureNodePtySpawnHelperExecutable,
+    getNextEmbeddedTerminalCloseTransition,
+    getNodePtySpawnHelperPath,
+    isStandaloneEscapeInput,
+    resolveEmbeddedTerminalShell,
+  } = await import(path.join(projectRoot, "dist/lib.js"));
 
-  const tmuxSession = buildTerminalLaunchCommands(cwd, {
-    env: { TMUX: "/tmp/tmux-501/default,123,0" },
+  assert.deepEqual(calculateEmbeddedTerminalLayout(100, 40), {
+    cols: 88,
+    height: 36,
+    left: 5,
+    rows: 34,
+    top: 2,
+    width: 90,
+  });
+  assert.deepEqual(resolveEmbeddedTerminalShell({
+    env: { SHELL: "/bin/zsh" },
     platform: "darwin",
-    windowTitle: "api",
-  });
-  assert.equal(tmuxSession[0].label, "tmux");
-  assert.equal(tmuxSession[0].command, "tmux");
-  assert.deepEqual(tmuxSession[0].args, ["new-window", "-c", cwd, "-n", "api"]);
-  assert.equal(tmuxSession[0].cwd, cwd);
-
-  const alacrittyDarwin = buildTerminalLaunchCommands(cwd, {
-    env: { __CFBundleIdentifier: "org.alacritty" },
-    platform: "darwin",
-  });
-  assert.equal(alacrittyDarwin[0].label, "Alacritty");
-  assert.equal(alacrittyDarwin[0].command, "open");
-  assert.deepEqual(alacrittyDarwin[0].args, ["-na", "Alacritty", "--args", "--working-directory", cwd]);
-  assert.equal(alacrittyDarwin[0].cwd, cwd);
-
-  const itermDarwin = buildTerminalLaunchCommands(cwd, {
-    env: { TERM_PROGRAM: "iTerm.app" },
-    platform: "darwin",
-  });
-  assert.equal(itermDarwin[0].label, "iTerm");
-  assert.equal(itermDarwin[0].command, "osascript");
-  assert.match(itermDarwin[0].args[1], /create window with default profile/);
-  assert.ok(itermDarwin[0].args[1].includes(`write text "cd '/tmp/my service/quote'\\\\''path'"`));
-
-  const terminalFallback = buildTerminalLaunchCommands(cwd, {
-    env: {},
-    platform: "darwin",
-  });
-  assert.equal(terminalFallback[0].label, "Terminal");
-  assert.match(terminalFallback[0].args[1], /tell application "Terminal"/);
-
-  const linuxKitty = buildTerminalLaunchCommands(cwd, {
-    env: { TERM: "xterm-kitty" },
-    platform: "linux",
-  });
-  assert.equal(linuxKitty[0].label, "Kitty");
-  assert.deepEqual(linuxKitty[0].args, ["--directory", cwd]);
-
-  const linuxFallback = buildTerminalLaunchCommands(cwd, {
+  }), { args: ["-i"], command: "/bin/zsh" });
+  assert.deepEqual(resolveEmbeddedTerminalShell({
     env: {},
     platform: "linux",
-  });
-  assert.equal(linuxFallback[0].command, "x-terminal-emulator");
-  assert.equal(linuxFallback[0].cwd, cwd);
-
-  const windowsTerminal = buildTerminalLaunchCommands("C:\\Users\\Dev User\\api", {
-    env: { WT_SESSION: "1" },
+  }), { args: ["-i"], command: "/bin/sh" });
+  assert.deepEqual(resolveEmbeddedTerminalShell({
+    env: { COMSPEC: "C:\\Windows\\System32\\cmd.exe" },
     platform: "win32",
+  }), { args: [], command: "C:\\Windows\\System32\\cmd.exe" });
+  assert.equal(
+    getNodePtySpawnHelperPath({
+      arch: "arm64",
+      platform: "darwin",
+      resolvedNodePtyEntry: "/app/node_modules/node-pty/lib/index.js",
+    }),
+    "/app/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper",
+  );
+  assert.equal(getNodePtySpawnHelperPath({ platform: "linux" }), null);
+
+  const helperFixture = await mkdtemp(path.join(os.tmpdir(), "dev-cli-node-pty-helper-"));
+  const helperPath = path.join(helperFixture, "spawn-helper");
+  await writeFile(helperPath, "");
+  await chmod(helperPath, 0o644);
+  ensureNodePtySpawnHelperExecutable(helperPath);
+  assert.equal((await stat(helperPath)).mode & 0o111, 0o111);
+
+  assert.equal(isStandaloneEscapeInput(Buffer.from([0x1b])), true);
+  assert.equal(isStandaloneEscapeInput(Buffer.from("\x1b[A")), false);
+  assert.equal(isStandaloneEscapeInput("x"), false);
+
+  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("idle", "escape", true), {
+    shouldClose: false,
+    state: "confirm",
   });
-  assert.equal(windowsTerminal[0].label, "Windows Terminal");
-  assert.deepEqual(windowsTerminal[0].args, ["-w", "new", "-d", "C:\\Users\\Dev User\\api"]);
+  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("confirm", "escape", true), {
+    shouldClose: true,
+    state: "confirm",
+  });
+  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("idle", "escape", false), {
+    shouldClose: true,
+    state: "idle",
+  });
+  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("confirm", "input", true), {
+    shouldClose: false,
+    state: "idle",
+  });
+
+  const xtermHeadless = await import("@xterm/headless");
+  const { Terminal } = xtermHeadless.default;
+  const terminal = new Terminal({
+    allowProposedApi: true,
+    cols: 8,
+    rows: 3,
+  });
+  await new Promise((resolve) => terminal.write("echo one\r\nsecond", resolve));
+  assert.equal(
+    buildEmbeddedTerminalContent(terminal, { showCursor: false }),
+    [
+      "echo one",
+      "second  ",
+      "        ",
+    ].join("\n"),
+  );
+
+  const colorTerminal = new Terminal({
+    allowProposedApi: true,
+    cols: 6,
+    rows: 1,
+  });
+  await new Promise((resolve) => colorTerminal.write("\u001b[31mred\u001b[39m", resolve));
+  assert.equal(
+    buildEmbeddedTerminalContent(colorTerminal, { showCursor: false }),
+    "{1-fg}red{/}   ",
+  );
 });
 
 test("buildLogViewerCommand uses the native terminal viewer script", async () => {
