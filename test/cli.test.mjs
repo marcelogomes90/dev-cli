@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { execa } from "execa";
 
 const projectRoot = process.cwd();
@@ -854,65 +854,127 @@ test("buildShortcutLine shows restart and clear logs only when available", async
   assert.match(workerLine, /\s--\s+--\s+--\s*$/u);
 });
 
-test("buildTerminalLaunchCommands prioritizes the current terminal and service cwd", async () => {
-  const { buildTerminalLaunchCommands } = await import(path.join(projectRoot, "dist/lib.js"));
-  const cwd = "/tmp/my service/quote'path";
+test("embedded terminal helpers resolve shell, layout, and close confirmation", async () => {
+  const {
+    calculateActionModalLayout,
+    buildEmbeddedTerminalEnvironment,
+    buildEmbeddedTerminalContent,
+    calculateEmbeddedTerminalLayout,
+    ensureNodePtySpawnHelperExecutable,
+    getNextEmbeddedTerminalCloseTransition,
+    getNodePtySpawnHelperPath,
+    isStandaloneEscapeInput,
+    resolveEmbeddedTerminalShell,
+  } = await import(path.join(projectRoot, "dist/lib.js"));
 
-  const tmuxSession = buildTerminalLaunchCommands(cwd, {
-    env: { TMUX: "/tmp/tmux-501/default,123,0" },
+  assert.deepEqual(calculateEmbeddedTerminalLayout(100, 40), {
+    cols: 94,
+    height: 38,
+    left: 2,
+    rows: 36,
+    top: 1,
+    width: 96,
+  });
+  assert.deepEqual(calculateActionModalLayout(100, 40, true), {
+    height: 11,
+    left: 16,
+    top: 14,
+    width: 68,
+  });
+  assert.deepEqual(resolveEmbeddedTerminalShell({
+    env: { SHELL: "/bin/zsh" },
     platform: "darwin",
-    windowTitle: "api",
-  });
-  assert.equal(tmuxSession[0].label, "tmux");
-  assert.equal(tmuxSession[0].command, "tmux");
-  assert.deepEqual(tmuxSession[0].args, ["new-window", "-c", cwd, "-n", "api"]);
-  assert.equal(tmuxSession[0].cwd, cwd);
-
-  const alacrittyDarwin = buildTerminalLaunchCommands(cwd, {
-    env: { __CFBundleIdentifier: "org.alacritty" },
-    platform: "darwin",
-  });
-  assert.equal(alacrittyDarwin[0].label, "Alacritty");
-  assert.equal(alacrittyDarwin[0].command, "open");
-  assert.deepEqual(alacrittyDarwin[0].args, ["-na", "Alacritty", "--args", "--working-directory", cwd]);
-  assert.equal(alacrittyDarwin[0].cwd, cwd);
-
-  const itermDarwin = buildTerminalLaunchCommands(cwd, {
-    env: { TERM_PROGRAM: "iTerm.app" },
-    platform: "darwin",
-  });
-  assert.equal(itermDarwin[0].label, "iTerm");
-  assert.equal(itermDarwin[0].command, "osascript");
-  assert.match(itermDarwin[0].args[1], /create window with default profile/);
-  assert.ok(itermDarwin[0].args[1].includes(`write text "cd '/tmp/my service/quote'\\\\''path'"`));
-
-  const terminalFallback = buildTerminalLaunchCommands(cwd, {
-    env: {},
-    platform: "darwin",
-  });
-  assert.equal(terminalFallback[0].label, "Terminal");
-  assert.match(terminalFallback[0].args[1], /tell application "Terminal"/);
-
-  const linuxKitty = buildTerminalLaunchCommands(cwd, {
-    env: { TERM: "xterm-kitty" },
-    platform: "linux",
-  });
-  assert.equal(linuxKitty[0].label, "Kitty");
-  assert.deepEqual(linuxKitty[0].args, ["--directory", cwd]);
-
-  const linuxFallback = buildTerminalLaunchCommands(cwd, {
+  }), { args: ["-i"], command: "/bin/zsh" });
+  assert.deepEqual(resolveEmbeddedTerminalShell({
     env: {},
     platform: "linux",
-  });
-  assert.equal(linuxFallback[0].command, "x-terminal-emulator");
-  assert.equal(linuxFallback[0].cwd, cwd);
-
-  const windowsTerminal = buildTerminalLaunchCommands("C:\\Users\\Dev User\\api", {
-    env: { WT_SESSION: "1" },
+  }), { args: ["-i"], command: "/bin/sh" });
+  assert.deepEqual(resolveEmbeddedTerminalShell({
+    env: { COMSPEC: "C:\\Windows\\System32\\cmd.exe" },
     platform: "win32",
+  }), { args: [], command: "C:\\Windows\\System32\\cmd.exe" });
+  assert.deepEqual(buildEmbeddedTerminalEnvironment({
+    baseEnv: {
+      COLORTERM: "",
+      GHOSTTY_BIN_DIR: "/ghostty",
+      PATH: "/usr/bin",
+      TERM: "tmux-256color",
+      TERM_PROGRAM: "tmux",
+      TMUX: "/tmp/tmux,1,0",
+    },
+    cwd: "/tmp/worktree",
+  }), {
+    COLORTERM: "truecolor",
+    PATH: "/usr/bin",
+    PWD: "/tmp/worktree",
+    PROMPT_EOL_MARK: "",
+    TERM: "xterm-256color",
   });
-  assert.equal(windowsTerminal[0].label, "Windows Terminal");
-  assert.deepEqual(windowsTerminal[0].args, ["-w", "new", "-d", "C:\\Users\\Dev User\\api"]);
+  assert.equal(
+    getNodePtySpawnHelperPath({
+      arch: "arm64",
+      platform: "darwin",
+      resolvedNodePtyEntry: "/app/node_modules/node-pty/lib/index.js",
+    }),
+    "/app/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper",
+  );
+  assert.equal(getNodePtySpawnHelperPath({ platform: "linux" }), null);
+
+  const helperFixture = await mkdtemp(path.join(os.tmpdir(), "dev-cli-node-pty-helper-"));
+  const helperPath = path.join(helperFixture, "spawn-helper");
+  await writeFile(helperPath, "");
+  await chmod(helperPath, 0o644);
+  ensureNodePtySpawnHelperExecutable(helperPath);
+  assert.equal((await stat(helperPath)).mode & 0o111, 0o111);
+
+  assert.equal(isStandaloneEscapeInput(Buffer.from([0x1b])), true);
+  assert.equal(isStandaloneEscapeInput(Buffer.from("\x1b[A")), false);
+  assert.equal(isStandaloneEscapeInput("x"), false);
+
+  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("idle", "escape", true), {
+    shouldClose: false,
+    state: "confirm",
+  });
+  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("confirm", "escape", true), {
+    shouldClose: true,
+    state: "confirm",
+  });
+  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("idle", "escape", false), {
+    shouldClose: true,
+    state: "idle",
+  });
+  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("confirm", "input", true), {
+    shouldClose: false,
+    state: "idle",
+  });
+
+  const xtermHeadless = await import("@xterm/headless");
+  const { Terminal } = xtermHeadless.default;
+  const terminal = new Terminal({
+    allowProposedApi: true,
+    cols: 8,
+    rows: 3,
+  });
+  await new Promise((resolve) => terminal.write("echo one\r\nsecond", resolve));
+  assert.equal(
+    buildEmbeddedTerminalContent(terminal, { showCursor: false }),
+    [
+      "echo one",
+      "second  ",
+      "        ",
+    ].join("\n"),
+  );
+
+  const colorTerminal = new Terminal({
+    allowProposedApi: true,
+    cols: 6,
+    rows: 1,
+  });
+  await new Promise((resolve) => colorTerminal.write("\u001b[31mred\u001b[39m", resolve));
+  assert.equal(
+    buildEmbeddedTerminalContent(colorTerminal, { showCursor: false }),
+    "{1-fg}red{/}   ",
+  );
 });
 
 test("buildLogViewerCommand uses the native terminal viewer script", async () => {
@@ -1072,6 +1134,9 @@ test("status prints live supervisor state when running", async () => {
       assert.ok(state);
       await stat(state.socketPath);
     });
+
+    const beforeStartState = await readSupervisorState(projectName);
+    await writeFile(beforeStartState.services.api.logPath, "stale-before-start\n", "utf8");
 
     const startResponse = await sendSupervisorRequest(projectName, {
       id: `start-${Date.now()}`,
@@ -1333,6 +1398,13 @@ test("supervisor restart stops and starts the service again", async () => {
       assert.ok(state?.services.api.pid);
     });
 
+    const runningState = await readSupervisorState(projectName);
+    const startedLog = await readFile(runningState.services.api.logPath, "utf8");
+    assert.doesNotMatch(startedLog, /stale-before-start/);
+
+    const afterStartState = await readSupervisorState(projectName);
+    await writeFile(afterStartState.services.api.logPath, "stale-start-log\n", "utf8");
+
     const initialState = await readSupervisorState(projectName);
     const initialPid = initialState?.services.api.pid;
 
@@ -1351,6 +1423,9 @@ test("supervisor restart stops and starts the service again", async () => {
       assert.ok(state?.services.api.pid);
       assert.notEqual(state?.services.api.pid, initialPid);
     });
+    const restartedState = await readSupervisorState(projectName);
+    const restartedLog = await readFile(restartedState.services.api.logPath, "utf8");
+    assert.doesNotMatch(restartedLog, /stale-start-log/);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
@@ -1410,9 +1485,8 @@ test("supervisor install restarts the service when it is running", async () => {
     assert.ok(state?.services.api.pid);
     assert.notEqual(state?.services.api.pid, beforePid);
     const logContent = await readFile(state.services.api.logPath, "utf8");
-    assert.match(logContent, /\[dev-cli\] Stopping api before install\./);
+    assert.doesNotMatch(logContent, /\[dev-cli\]/);
     assert.match(logContent, /installed/);
-    assert.match(logContent, /\[dev-cli\] Restarting api after install\./);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
@@ -1574,8 +1648,8 @@ test("supervisor pull-branch rebases the current branch for a stopped git servic
     assert.equal(state?.services.api.status, "stopped");
     assert.equal(state?.services.api.branch, branch);
     const logContent = await readFile(state.services.api.logPath, "utf8");
-    assert.match(logContent, /\[dev-cli\] Running git pull --rebase\.\.\./);
-    assert.match(logContent, new RegExp(`\\[dev-cli\\] Pulled ${branch} with rebase\\.`));
+    assert.doesNotMatch(logContent, /\[dev-cli\]/);
+    assert.match(logContent, /Fast-forward|Updating/);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
@@ -1618,8 +1692,8 @@ test("supervisor checkout-branch writes git action results to the service log", 
 
     const state = await readSupervisorState(projectName);
     const logContent = await readFile(state.services.api.logPath, "utf8");
-    assert.match(logContent, /\[dev-cli\] Running git checkout main\.\.\./);
-    assert.match(logContent, /\[dev-cli\] Checked out main\./);
+    assert.doesNotMatch(logContent, /\[dev-cli\]/);
+    assert.match(logContent, /Switched to branch 'main'/);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
@@ -1678,9 +1752,8 @@ test("supervisor checkout-branch restarts the service when it is running", async
     assert.equal(state?.services.api.branch, "main");
     assert.notEqual(state?.services.api.pid, beforePid);
     const logContent = await readFile(state.services.api.logPath, "utf8");
-    assert.match(logContent, /\[dev-cli\] Stopping api before checkout\./);
-    assert.match(logContent, /\[dev-cli\] Running git checkout main\.\.\./);
-    assert.match(logContent, /\[dev-cli\] Restarting api after checkout\./);
+    assert.doesNotMatch(logContent, /\[dev-cli\]/);
+    assert.match(logContent, /Switched to branch 'main'/);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
@@ -1742,9 +1815,8 @@ test("supervisor pull-branch restarts the service when it is running", async () 
     assert.equal(state?.services.api.branch, branch);
     assert.notEqual(state?.services.api.pid, beforePid);
     const logContent = await readFile(state.services.api.logPath, "utf8");
-    assert.match(logContent, /\[dev-cli\] Stopping api before pull\./);
-    assert.match(logContent, /\[dev-cli\] Running git pull --rebase\.\.\./);
-    assert.match(logContent, /\[dev-cli\] Restarting api after pull\./);
+    assert.doesNotMatch(logContent, /\[dev-cli\]/);
+    assert.match(logContent, /Fast-forward|Updating/);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);

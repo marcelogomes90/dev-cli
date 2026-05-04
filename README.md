@@ -12,7 +12,7 @@ It starts services through a detached supervisor process, keeps live state on di
 - Opens a terminal UI to start, stop, restart, install, inspect, and manage services individually.
 - Shows live workspace CPU/RAM metrics, per-service CPU/RAM usage, and git branch information when a service directory is a git repository.
 - Stores per-service logs and opens them in the native terminal viewer from the UI.
-- Opens a service directory in your editor or in a new terminal window from the UI.
+- Opens a service directory in your editor or in an embedded terminal from the UI.
 
 ## Requirements
 
@@ -222,20 +222,23 @@ The header shows the project name, running service count, and live CPU/RAM usage
 ### Actions
 
 - `a` or `Enter`: start the selected stopped service
-- `i`: run `installCommand` for the selected stopped, failed, or running service
+- `i`: open a confirmation modal for `installCommand` on the selected stopped, failed, or running service
 - `s`: stop the selected running service
 - `r`: restart the selected running service, or recover a failed service by starting it again
 - `c`: clear logs for the selected service when logs exist
 - `v`: open the full service log in the native terminal viewer
 - `e`: open the selected service directory in the configured editor
-- `t`: open the selected service directory in a new terminal window, or a new tmux window when already inside tmux
+- `t`: open an embedded terminal for the selected service directory
+- `Esc` inside the embedded terminal: ask for confirmation; press `Esc` again to close it and return to the UI
 
 ### Git actions
 
-- `p`: run `git pull --rebase` for a stopped, failed, or running git service
-- `d`: prompt for a branch name and run `git checkout` for a stopped, failed, or running git service
+- `p`: open a confirmation modal for `git pull --rebase`
+- `d`: open a confirmation modal with a branch input field and run `git checkout`
 
-When `install`, `pull`, or `checkout` is run for a running service, the supervisor stops the service first and restarts it after the action succeeds. The service log records the stop, action, and restart steps.
+`install`, `pull`, and `checkout` clear the selected service log before running. When those actions target a running service, the supervisor stops the service first, runs the action, and restarts it after success without clearing the log again, so the command output remains visible in the log pane.
+
+`start` always clears the selected service log before launching the service. `restart` stops the service, clears the log, and then starts it again.
 
 ## Typical Workflow
 

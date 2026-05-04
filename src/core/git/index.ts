@@ -1,6 +1,20 @@
 import { execa } from "execa";
 import { AppError } from "../../utils/errors";
 
+export interface GitActionResult {
+  branch: string;
+  output: string;
+}
+
+export class GitActionError extends AppError {
+  output: string;
+
+  constructor(message: string, output: string) {
+    super(message);
+    this.output = output;
+  }
+}
+
 async function runGit(cwd: string, args: string[]): Promise<string> {
   try {
     const result = await execa("git", args, {
@@ -117,6 +131,45 @@ export async function checkoutBranch(cwd: string, branch: string): Promise<strin
   throw new AppError(getCheckoutErrorMessage(target, createOutput));
 }
 
+export async function checkoutBranchWithOutput(cwd: string, branch: string): Promise<GitActionResult> {
+  const target = branch.trim();
+  if (!target) {
+    throw new AppError("Branch name is required.");
+  }
+
+  const checkout = await execa("git", ["checkout", target], {
+    cwd,
+    reject: false,
+  });
+
+  const checkoutOutput = [checkout.stdout, checkout.stderr].filter(Boolean).join("\n").trim();
+  if (checkout.exitCode === 0) {
+    return {
+      branch: await getCurrentBranch(cwd),
+      output: checkoutOutput,
+    };
+  }
+
+  if (!isMissingBranchError(checkoutOutput)) {
+    throw new GitActionError(getCheckoutErrorMessage(target, checkoutOutput), checkoutOutput);
+  }
+
+  const create = await execa("git", ["checkout", "-b", target], {
+    cwd,
+    reject: false,
+  });
+
+  const createOutput = [create.stdout, create.stderr].filter(Boolean).join("\n").trim();
+  if (create.exitCode === 0) {
+    return {
+      branch: await getCurrentBranch(cwd),
+      output: createOutput,
+    };
+  }
+
+  throw new GitActionError(getCheckoutErrorMessage(target, createOutput), createOutput);
+}
+
 export async function pullBranchRebase(cwd: string): Promise<string> {
   const pull = await execa("git", ["pull", "--rebase"], {
     cwd,
@@ -129,4 +182,21 @@ export async function pullBranchRebase(cwd: string): Promise<string> {
 
   const pullOutput = [pull.stderr, pull.stdout].filter(Boolean).join("\n").trim();
   throw new AppError(getPullErrorMessage(pullOutput));
+}
+
+export async function pullBranchRebaseWithOutput(cwd: string): Promise<GitActionResult> {
+  const pull = await execa("git", ["pull", "--rebase"], {
+    cwd,
+    reject: false,
+  });
+
+  const pullOutput = [pull.stdout, pull.stderr].filter(Boolean).join("\n").trim();
+  if (pull.exitCode === 0) {
+    return {
+      branch: await getCurrentBranch(cwd),
+      output: pullOutput,
+    };
+  }
+
+  throw new GitActionError(getPullErrorMessage(pullOutput), pullOutput);
 }
