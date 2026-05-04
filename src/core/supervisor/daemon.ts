@@ -3,7 +3,14 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { appendFile, rm, writeFile } from "node:fs/promises";
 import type { Readable } from "node:stream";
 import { loadProjectConfig, type ProjectConfig } from "../config";
-import { checkoutBranch, getCurrentBranch, isGitRepository, pullBranchRebase } from "../git";
+import {
+  checkoutBranchWithOutput,
+  getCurrentBranch,
+  GitActionError,
+  isGitRepository,
+  pullBranchRebaseWithOutput,
+  type GitActionResult,
+} from "../git";
 import { AppError, getErrorMessage } from "../../utils/errors";
 import {
   isProcessAlive,
@@ -395,22 +402,23 @@ export class SupervisorDaemon {
 
   private async runGitServiceAction(
     context: ManagedServiceContext,
-    pendingMessage: string,
-    action: () => Promise<string>,
+    action: () => Promise<GitActionResult>,
     successMessage: (branchName: string) => string,
   ): Promise<SupervisorServiceResult> {
     const { entry, serviceName } = context;
 
     try {
-      await this.appendSupervisorLog(serviceName, pendingMessage);
-      const nextBranch = await action();
+      await this.clearServiceLogFile(serviceName);
+      const { branch, output } = await action();
+      if (output) {
+        await this.appendServiceLog(serviceName, output.endsWith("\n") ? output : `${output}\n`);
+      }
       entry.isGit = true;
-      entry.branch = nextBranch;
+      entry.branch = branch;
       this.lastBranchRefreshAt = Date.now();
       await saveSupervisorState(this.state);
 
-      const message = successMessage(nextBranch);
-      await this.appendSupervisorLog(serviceName, message);
+      const message = successMessage(branch);
       return {
         service: serviceName,
         ok: true,
@@ -418,7 +426,13 @@ export class SupervisorDaemon {
       };
     } catch (error) {
       const message = getErrorMessage(error);
-      await this.appendSupervisorLog(serviceName, message);
+      const output = error instanceof GitActionError ? error.output : "";
+      await this.clearServiceLogFile(serviceName);
+      if (output) {
+        await this.appendServiceLog(serviceName, output.endsWith("\n") ? output : `${output}\n`);
+      } else {
+        await this.appendServiceLog(serviceName, `${message}\n`);
+      }
       return {
         service: serviceName,
         ok: false,
@@ -457,10 +471,13 @@ export class SupervisorDaemon {
       "checkout",
       () => this.runGitServiceAction(
         gitContext,
-        `Running git checkout ${targetBranch}...`,
-        () => checkoutBranch(gitContext.service.cwd, targetBranch),
+        () => checkoutBranchWithOutput(gitContext.service.cwd, targetBranch),
         (nextBranch) => `Checked out ${nextBranch}.`,
       ),
+      {
+        logLifecycleMessages: false,
+        preserveLogOnRestart: true,
+      },
     );
   }
 
@@ -482,10 +499,13 @@ export class SupervisorDaemon {
       "pull",
       () => this.runGitServiceAction(
         gitContext,
-        "Running git pull --rebase...",
-        () => pullBranchRebase(gitContext.service.cwd),
+        () => pullBranchRebaseWithOutput(gitContext.service.cwd),
         (nextBranch) => `Pulled ${nextBranch} with rebase.`,
       ),
+      {
+        logLifecycleMessages: false,
+        preserveLogOnRestart: true,
+      },
     );
   }
 
@@ -612,7 +632,14 @@ export class SupervisorDaemon {
     return this.spawnManagedProcess(serviceName, this.config.services[serviceName].command);
   }
 
-  private async startService(serviceName: string): Promise<SupervisorServiceResult> {
+  private async clearServiceLogFile(serviceName: string): Promise<void> {
+    await writeFile(this.state.services[serviceName].logPath, "");
+  }
+
+  private async startService(
+    serviceName: string,
+    options: { preserveLog?: boolean } = {},
+  ): Promise<SupervisorServiceResult> {
     const entry = this.state.services[serviceName];
 
     if (entry.status === "running" && isProcessAlive(entry.pid)) {
@@ -620,14 +647,16 @@ export class SupervisorDaemon {
     }
 
     if (isProcessAlive(entry.pid)) {
-      await this.stopService(serviceName);
+      await this.stopService(serviceName, { preserveLog: true });
     }
 
     entry.status = "starting";
     entry.exitCode = null;
     entry.lastStoppedAt = null;
     setResourceMetrics(entry, null, null);
-    await writeFile(entry.logPath, "", { flag: "a" });
+    if (!options.preserveLog) {
+      await this.clearServiceLogFile(serviceName);
+    }
 
     const managed = this.spawnServiceProcess(serviceName);
     entry.pid = managed.child.pid ?? null;
@@ -643,15 +672,22 @@ export class SupervisorDaemon {
     serviceName: string,
     actionName: string,
     action: () => Promise<SupervisorServiceResult>,
+    options: {
+      logLifecycleMessages?: boolean;
+      preserveLogOnRestart?: boolean;
+    } = {},
   ): Promise<SupervisorServiceResult> {
     const entry = this.state.services[serviceName];
     const shouldRestart = entry.status === "running" && entry.pid !== null && isProcessAlive(entry.pid);
+    const shouldLogLifecycle = options.logLifecycleMessages ?? true;
 
     if (!shouldRestart) {
       return action();
     }
 
-    await this.appendSupervisorLog(serviceName, `Stopping ${serviceName} before ${actionName}.`);
+    if (shouldLogLifecycle) {
+      await this.appendSupervisorLog(serviceName, `Stopping ${serviceName} before ${actionName}.`);
+    }
     const stopResult = await this.stopService(serviceName, { preserveLog: true });
     if (!stopResult.ok) {
       return {
@@ -666,8 +702,12 @@ export class SupervisorDaemon {
       return actionResult;
     }
 
-    await this.appendSupervisorLog(serviceName, `Restarting ${serviceName} after ${actionName}.`);
-    const startResult = await this.startService(serviceName);
+    if (shouldLogLifecycle) {
+      await this.appendSupervisorLog(serviceName, `Restarting ${serviceName} after ${actionName}.`);
+    }
+    const startResult = await this.startService(serviceName, {
+      preserveLog: options.preserveLogOnRestart,
+    });
     if (!startResult.ok) {
       return startResult;
     }
@@ -697,7 +737,7 @@ export class SupervisorDaemon {
     const shouldRestart = entry.status === "running" && entry.pid !== null && isProcessAlive(entry.pid);
     if (shouldRestart) {
       return this.runRestartableAction(serviceName, "install", async () => {
-        const result = await this.installService(serviceName, { preserveLog: true });
+        const result = await this.installService(serviceName);
         const managed = this.children.get(serviceName);
         if (!result.ok || !managed) {
           return result;
@@ -717,6 +757,9 @@ export class SupervisorDaemon {
           ok: true,
           message: "Installed dependencies",
         };
+      }, {
+        logLifecycleMessages: false,
+        preserveLogOnRestart: true,
       });
     }
 
@@ -733,7 +776,7 @@ export class SupervisorDaemon {
     entry.lastStoppedAt = null;
     setResourceMetrics(entry, null, null);
     if (!options.preserveLog) {
-      await writeFile(entry.logPath, "");
+      await this.clearServiceLogFile(serviceName);
     }
 
     const managed = this.spawnManagedProcess(serviceName, installCommand);
@@ -764,7 +807,6 @@ export class SupervisorDaemon {
     entry.status = "restarting";
     await saveSupervisorState(this.state);
 
-    await this.appendSupervisorLog(serviceName, `Restarting ${serviceName}...`);
     const stopResult = await this.stopService(serviceName, { preserveLog: true });
     if (!stopResult.ok) {
       return {
@@ -785,8 +827,6 @@ export class SupervisorDaemon {
         message: startResult.message,
       };
     }
-
-    await this.appendSupervisorLog(serviceName, "Service started.");
     return {
       service: serviceName,
       ok: true,
@@ -843,7 +883,7 @@ export class SupervisorDaemon {
     entry.lastStoppedAt = new Date().toISOString();
     setResourceMetrics(entry, null, null);
     if (!options.preserveLog) {
-      await writeFile(entry.logPath, "");
+      await this.clearServiceLogFile(serviceName);
     }
     this.children.delete(serviceName);
     await saveSupervisorState(this.state);
@@ -851,8 +891,7 @@ export class SupervisorDaemon {
   }
 
   private async clearServiceLogs(serviceName: string): Promise<SupervisorServiceResult> {
-    const entry = this.state.services[serviceName];
-    await writeFile(entry.logPath, "");
+    await this.clearServiceLogFile(serviceName);
     return { service: serviceName, ok: true, message: "Logs cleared" };
   }
 

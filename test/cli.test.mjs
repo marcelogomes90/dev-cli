@@ -856,6 +856,7 @@ test("buildShortcutLine shows restart and clear logs only when available", async
 
 test("embedded terminal helpers resolve shell, layout, and close confirmation", async () => {
   const {
+    calculateActionModalLayout,
     buildEmbeddedTerminalEnvironment,
     buildEmbeddedTerminalContent,
     calculateEmbeddedTerminalLayout,
@@ -873,6 +874,12 @@ test("embedded terminal helpers resolve shell, layout, and close confirmation", 
     rows: 36,
     top: 1,
     width: 96,
+  });
+  assert.deepEqual(calculateActionModalLayout(100, 40, true), {
+    height: 11,
+    left: 16,
+    top: 14,
+    width: 68,
   });
   assert.deepEqual(resolveEmbeddedTerminalShell({
     env: { SHELL: "/bin/zsh" },
@@ -1127,6 +1134,9 @@ test("status prints live supervisor state when running", async () => {
       assert.ok(state);
       await stat(state.socketPath);
     });
+
+    const beforeStartState = await readSupervisorState(projectName);
+    await writeFile(beforeStartState.services.api.logPath, "stale-before-start\n", "utf8");
 
     const startResponse = await sendSupervisorRequest(projectName, {
       id: `start-${Date.now()}`,
@@ -1388,6 +1398,13 @@ test("supervisor restart stops and starts the service again", async () => {
       assert.ok(state?.services.api.pid);
     });
 
+    const runningState = await readSupervisorState(projectName);
+    const startedLog = await readFile(runningState.services.api.logPath, "utf8");
+    assert.doesNotMatch(startedLog, /stale-before-start/);
+
+    const afterStartState = await readSupervisorState(projectName);
+    await writeFile(afterStartState.services.api.logPath, "stale-start-log\n", "utf8");
+
     const initialState = await readSupervisorState(projectName);
     const initialPid = initialState?.services.api.pid;
 
@@ -1406,6 +1423,9 @@ test("supervisor restart stops and starts the service again", async () => {
       assert.ok(state?.services.api.pid);
       assert.notEqual(state?.services.api.pid, initialPid);
     });
+    const restartedState = await readSupervisorState(projectName);
+    const restartedLog = await readFile(restartedState.services.api.logPath, "utf8");
+    assert.doesNotMatch(restartedLog, /stale-start-log/);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
@@ -1465,9 +1485,8 @@ test("supervisor install restarts the service when it is running", async () => {
     assert.ok(state?.services.api.pid);
     assert.notEqual(state?.services.api.pid, beforePid);
     const logContent = await readFile(state.services.api.logPath, "utf8");
-    assert.match(logContent, /\[dev-cli\] Stopping api before install\./);
+    assert.doesNotMatch(logContent, /\[dev-cli\]/);
     assert.match(logContent, /installed/);
-    assert.match(logContent, /\[dev-cli\] Restarting api after install\./);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
@@ -1629,8 +1648,8 @@ test("supervisor pull-branch rebases the current branch for a stopped git servic
     assert.equal(state?.services.api.status, "stopped");
     assert.equal(state?.services.api.branch, branch);
     const logContent = await readFile(state.services.api.logPath, "utf8");
-    assert.match(logContent, /\[dev-cli\] Running git pull --rebase\.\.\./);
-    assert.match(logContent, new RegExp(`\\[dev-cli\\] Pulled ${branch} with rebase\\.`));
+    assert.doesNotMatch(logContent, /\[dev-cli\]/);
+    assert.match(logContent, /Fast-forward|Updating/);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
@@ -1673,8 +1692,8 @@ test("supervisor checkout-branch writes git action results to the service log", 
 
     const state = await readSupervisorState(projectName);
     const logContent = await readFile(state.services.api.logPath, "utf8");
-    assert.match(logContent, /\[dev-cli\] Running git checkout main\.\.\./);
-    assert.match(logContent, /\[dev-cli\] Checked out main\./);
+    assert.doesNotMatch(logContent, /\[dev-cli\]/);
+    assert.match(logContent, /Switched to branch 'main'/);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
@@ -1733,9 +1752,8 @@ test("supervisor checkout-branch restarts the service when it is running", async
     assert.equal(state?.services.api.branch, "main");
     assert.notEqual(state?.services.api.pid, beforePid);
     const logContent = await readFile(state.services.api.logPath, "utf8");
-    assert.match(logContent, /\[dev-cli\] Stopping api before checkout\./);
-    assert.match(logContent, /\[dev-cli\] Running git checkout main\.\.\./);
-    assert.match(logContent, /\[dev-cli\] Restarting api after checkout\./);
+    assert.doesNotMatch(logContent, /\[dev-cli\]/);
+    assert.match(logContent, /Switched to branch 'main'/);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
@@ -1797,9 +1815,8 @@ test("supervisor pull-branch restarts the service when it is running", async () 
     assert.equal(state?.services.api.branch, branch);
     assert.notEqual(state?.services.api.pid, beforePid);
     const logContent = await readFile(state.services.api.logPath, "utf8");
-    assert.match(logContent, /\[dev-cli\] Stopping api before pull\./);
-    assert.match(logContent, /\[dev-cli\] Running git pull --rebase\.\.\./);
-    assert.match(logContent, /\[dev-cli\] Restarting api after pull\./);
+    assert.doesNotMatch(logContent, /\[dev-cli\]/);
+    assert.match(logContent, /Fast-forward|Updating/);
   } finally {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
