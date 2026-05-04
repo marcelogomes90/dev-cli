@@ -22,6 +22,11 @@ export interface EmbeddedTerminalShell {
   command: string;
 }
 
+export interface EmbeddedTerminalEnvironmentOptions {
+  baseEnv?: NodeJS.ProcessEnv;
+  cwd?: string;
+}
+
 export type EmbeddedTerminalCloseState = "confirm" | "idle";
 export type EmbeddedTerminalCloseEvent = "escape" | "input";
 
@@ -49,10 +54,12 @@ interface EmbeddedTerminalOptions {
 }
 
 const CLOSE_REQUEST_DEDUPE_MS = 75;
+const EMBEDDED_TERMINAL_SCREEN_RATIO = 0.96;
 const INITIAL_INPUT_READY_DELAY_MS = 250;
 const NODE_PTY_HELPER_MODE = 0o755;
 const PROMPT_SETTLE_DELAY_MS = 120;
 const TERMINAL_RENDER_DEBOUNCE_MS = 16;
+const TERMINAL_ENVIRONMENT_STRIP_PATTERN = /^(TERM_PROGRAM|TERMINAL|ITERM|LC_TERMINAL|WEZTERM|VTE|KITTY|WT_|GHOSTTY|BOLD|TABBY|VSCODE|TMUX|TMUX_)/;
 const require = createRequire(import.meta.url);
 const { Terminal: XtermTerminal } = xtermHeadless as typeof import("@xterm/headless");
 
@@ -65,8 +72,8 @@ interface EmbeddedTerminalProgram {
 export function calculateEmbeddedTerminalLayout(screenWidth: number, screenHeight: number): EmbeddedTerminalLayout {
   const boundedScreenWidth = Math.max(Math.floor(screenWidth), 1);
   const boundedScreenHeight = Math.max(Math.floor(screenHeight), 1);
-  const width = Math.max(1, Math.min(boundedScreenWidth, Math.floor(boundedScreenWidth * 0.9)));
-  const height = Math.max(1, Math.min(boundedScreenHeight, Math.floor(boundedScreenHeight * 0.9)));
+  const width = Math.max(1, Math.min(boundedScreenWidth, Math.floor(boundedScreenWidth * EMBEDDED_TERMINAL_SCREEN_RATIO)));
+  const height = Math.max(1, Math.min(boundedScreenHeight, Math.floor(boundedScreenHeight * EMBEDDED_TERMINAL_SCREEN_RATIO)));
 
   return {
     cols: Math.max(width - 2, 1),
@@ -164,6 +171,32 @@ export function ensureEmbeddedTerminalNoEcho(ptyPath: string | null | undefined)
   }
 }
 
+export function buildEmbeddedTerminalEnvironment(
+  {
+    baseEnv = process.env,
+    cwd,
+  }: EmbeddedTerminalEnvironmentOptions = {},
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...baseEnv,
+    COLORTERM: baseEnv.COLORTERM || "truecolor",
+    PROMPT_EOL_MARK: "",
+    TERM: "xterm-256color",
+  };
+
+  if (cwd) {
+    env.PWD = cwd;
+  }
+
+  for (const key of Object.keys(env)) {
+    if (TERMINAL_ENVIRONMENT_STRIP_PATTERN.test(key)) {
+      delete env[key];
+    }
+  }
+
+  return env;
+}
+
 function truncateLabel(value: string, maxWidth: number): string {
   if (value.length <= maxWidth) {
     return value;
@@ -240,6 +273,13 @@ function getCellStyleTag(cell: ReturnType<HeadlessTerminal["buffer"]["active"]["
   return styleParts.join(",");
 }
 
+function buildBackdropContent(screenWidth: number, screenHeight: number): string {
+  const width = Math.max(Math.floor(screenWidth), 1);
+  const height = Math.max(Math.floor(screenHeight), 1);
+  const line = " ".repeat(width);
+  return Array.from({ length: height }, () => line).join("\n");
+}
+
 export function buildEmbeddedTerminalContent(
   terminal: HeadlessTerminal,
   { showCursor = true }: EmbeddedTerminalContentOptions = {},
@@ -300,6 +340,7 @@ export function buildEmbeddedTerminalContent(
 export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): EmbeddedTerminalController {
   const { cwd, onClose, onEscapeInput, screen, serviceName } = options;
   const program = screen.program as EmbeddedTerminalProgram;
+  const terminalEnvironment = buildEmbeddedTerminalEnvironment({ baseEnv: process.env, cwd });
   const shell = resolveEmbeddedTerminalShell();
   let layout = calculateEmbeddedTerminalLayout(Number(screen.width), Number(screen.height));
   let closeState: EmbeddedTerminalCloseState = "idle";
@@ -314,8 +355,11 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
   let outputSubscription: IDisposable | null = null;
   let exitSubscription: IDisposable | null = null;
   let inputListener: ((input: Buffer | string) => void) | null = null;
+  let terminalBinarySubscription: XtermDisposable | null = null;
+  let terminalDataSubscription: XtermDisposable | null = null;
   let terminalWriteSubscription: XtermDisposable | null = null;
   let pty: IPty | null = null;
+  let ptyPath: string | null = null;
   let renderTimer: NodeJS.Timeout | null = null;
   const restoreMouseOnClose = Boolean(program.mouseEnabled);
   const terminal = new XtermTerminal({
@@ -327,6 +371,15 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     scrollback: 2_000,
   });
 
+  const backdropBox = blessed.box({
+    height: "100%",
+    left: 0,
+    mouse: false,
+    tags: false,
+    top: 0,
+    width: "100%",
+  });
+
   const terminalBox = blessed.box({
     border: "line",
     focusable: true,
@@ -336,7 +389,6 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     mouse: false,
     scrollable: false,
     style: {
-      bg: "black",
       border: { fg: "blue" },
       fg: UI_THEME.text,
     },
@@ -384,6 +436,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
 
   const updateLayout = () => {
     layout = calculateEmbeddedTerminalLayout(Number(screen.width), Number(screen.height));
+    backdropBox.setContent(buildBackdropContent(Number(screen.width), Number(screen.height)));
     terminalBox.top = layout.top;
     terminalBox.left = layout.left;
     terminalBox.width = layout.width;
@@ -427,6 +480,8 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     }
     outputSubscription?.dispose();
     exitSubscription?.dispose();
+    terminalBinarySubscription?.dispose();
+    terminalDataSubscription?.dispose();
     terminalWriteSubscription?.dispose();
     if (inputListener) {
       screen.program.input.removeListener("data", inputListener);
@@ -434,6 +489,8 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     }
     outputSubscription = null;
     exitSubscription = null;
+    terminalBinarySubscription = null;
+    terminalDataSubscription = null;
     terminalWriteSubscription = null;
 
     if (kill && ptyAlive) {
@@ -446,6 +503,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
 
     terminal.dispose();
     terminalBox.destroy();
+    backdropBox.destroy();
     screen.clearRegion(layout.left, layout.left + layout.width, layout.top, layout.top + layout.height);
     if (restoreMouseOnClose) {
       program.enableMouse();
@@ -493,10 +551,11 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
 
     const bufferedInput = pendingStartupInput.join("");
     pendingStartupInput = [];
-    pty?.write(bufferedInput);
+    terminal.input(bufferedInput);
   };
 
   const markStartupInputReady = () => {
+    ensureEmbeddedTerminalNoEcho(ptyPath);
     startupInputReady = true;
     if (readyTimer) {
       clearTimeout(readyTimer);
@@ -533,6 +592,8 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     return true;
   }
 
+  backdropBox.setContent(buildBackdropContent(Number(screen.width), Number(screen.height)));
+  screen.append(backdropBox);
   screen.append(terminalBox);
   if (restoreMouseOnClose) {
     program.disableMouse();
@@ -543,20 +604,18 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     pty = spawnPty(shell.command, shell.args, {
       cols: layout.cols,
       cwd,
-      env: {
-        ...process.env,
-        COLORTERM: process.env.COLORTERM || "truecolor",
-        TERM: process.env.TERM || "xterm-256color",
-      },
-      name: process.env.TERM || "xterm-256color",
+      env: terminalEnvironment,
+      name: terminalEnvironment.TERM || "xterm-256color",
       rows: layout.rows,
     });
-    ensureEmbeddedTerminalNoEcho((pty as IPty & { _pty?: string })._pty);
+    ptyPath = (pty as IPty & { _pty?: string })._pty ?? null;
+    ensureEmbeddedTerminalNoEcho(ptyPath);
   } catch (error) {
     if (restoreMouseOnClose) {
       program.enableMouse();
     }
     terminal.dispose();
+    backdropBox.destroy();
     terminalBox.destroy();
     throw error;
   }
@@ -571,6 +630,22 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     if (updateTerminalContent()) {
       requestTerminalRender();
     }
+  });
+
+  terminalDataSubscription = terminal.onData((data) => {
+    if (!ptyAlive || closed) {
+      return;
+    }
+
+    pty?.write(data);
+  });
+
+  terminalBinarySubscription = terminal.onBinary((data) => {
+    if (!ptyAlive || closed) {
+      return;
+    }
+
+    pty?.write(data);
   });
 
   inputListener = (input: Buffer | string) => {
@@ -602,7 +677,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
       return;
     }
 
-    pty?.write(inputText);
+    terminal.input(inputText);
   };
   screen.program.input.on("data", inputListener);
 

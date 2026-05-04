@@ -856,6 +856,7 @@ test("buildShortcutLine shows restart and clear logs only when available", async
 
 test("embedded terminal helpers resolve shell, layout, and close confirmation", async () => {
   const {
+    buildEmbeddedTerminalEnvironment,
     buildEmbeddedTerminalContent,
     calculateEmbeddedTerminalLayout,
     ensureNodePtySpawnHelperExecutable,
@@ -866,12 +867,12 @@ test("embedded terminal helpers resolve shell, layout, and close confirmation", 
   } = await import(path.join(projectRoot, "dist/lib.js"));
 
   assert.deepEqual(calculateEmbeddedTerminalLayout(100, 40), {
-    cols: 88,
-    height: 36,
-    left: 5,
-    rows: 34,
-    top: 2,
-    width: 90,
+    cols: 94,
+    height: 38,
+    left: 2,
+    rows: 36,
+    top: 1,
+    width: 96,
   });
   assert.deepEqual(resolveEmbeddedTerminalShell({
     env: { SHELL: "/bin/zsh" },
@@ -885,6 +886,23 @@ test("embedded terminal helpers resolve shell, layout, and close confirmation", 
     env: { COMSPEC: "C:\\Windows\\System32\\cmd.exe" },
     platform: "win32",
   }), { args: [], command: "C:\\Windows\\System32\\cmd.exe" });
+  assert.deepEqual(buildEmbeddedTerminalEnvironment({
+    baseEnv: {
+      COLORTERM: "",
+      GHOSTTY_BIN_DIR: "/ghostty",
+      PATH: "/usr/bin",
+      TERM: "tmux-256color",
+      TERM_PROGRAM: "tmux",
+      TMUX: "/tmp/tmux,1,0",
+    },
+    cwd: "/tmp/worktree",
+  }), {
+    COLORTERM: "truecolor",
+    PATH: "/usr/bin",
+    PWD: "/tmp/worktree",
+    PROMPT_EOL_MARK: "",
+    TERM: "xterm-256color",
+  });
   assert.equal(
     getNodePtySpawnHelperPath({
       arch: "arm64",

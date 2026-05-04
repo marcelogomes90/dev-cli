@@ -34,6 +34,7 @@ import { buildServiceContent, buildShortcutLine, type ServiceRenderResult } from
 import { muted, toneTag, truncate, UI_THEME, type MessageTone } from "./theme";
 
 export {
+  buildEmbeddedTerminalEnvironment,
   buildEmbeddedTerminalContent,
   calculateEmbeddedTerminalLayout,
   ensureNodePtySpawnHelperExecutable,
