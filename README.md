@@ -128,7 +128,7 @@ services:
 - After one dependency phase is started, the next dependent phase waits 5 seconds before starting.
 - Services in the same dependency phase start together after that shared delay.
 - `--only` accepts group names or service names.
-- Group `layout` metadata is parsed if present in the config, but the built-in UI does not currently depend on it.
+- Group `layout` metadata is still accepted in the config for compatibility, but the built-in UI does not currently use it.
 - Hooks run in the workspace root using the current shell environment.
 - Service commands and install commands run through the current shell from each service `cwd`.
 
@@ -228,10 +228,12 @@ The header shows the project name, running service count, and live CPU/RAM usage
 - `c`: clear logs for the selected service when logs exist
 - `v`: open the full service log in the native terminal viewer
 - `e`: open the selected service directory in the configured editor
-- `t`: open an embedded terminal for the selected service directory
+- `t`: open a full-screen embedded terminal for the selected service directory
 - `x`: kill the embedded terminal for the selected service
 - `?`: open a shortcut help modal with the full list of available keys
 - `Esc` inside the embedded terminal: hide it and return to the UI; press `t` again to resume the same session for that service
+
+The embedded terminal takes over the full TUI while it is visible. Hiding it restores the services and logs panes exactly where you left them.
 
 If you try to exit the UI while one or more embedded terminal sessions are still running, the UI asks for confirmation before killing them.
 

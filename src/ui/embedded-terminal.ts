@@ -50,7 +50,6 @@ interface EmbeddedTerminalOptions {
 }
 
 const CLOSE_REQUEST_DEDUPE_MS = 75;
-const EMBEDDED_TERMINAL_SCREEN_RATIO = 0.96;
 const INITIAL_INPUT_READY_DELAY_MS = 250;
 const NODE_PTY_HELPER_MODE = 0o755;
 const PROMPT_SETTLE_DELAY_MS = 120;
@@ -68,15 +67,15 @@ interface EmbeddedTerminalProgram {
 export function calculateEmbeddedTerminalLayout(screenWidth: number, screenHeight: number): EmbeddedTerminalLayout {
   const boundedScreenWidth = Math.max(Math.floor(screenWidth), 1);
   const boundedScreenHeight = Math.max(Math.floor(screenHeight), 1);
-  const width = Math.max(1, Math.min(boundedScreenWidth, Math.floor(boundedScreenWidth * EMBEDDED_TERMINAL_SCREEN_RATIO)));
-  const height = Math.max(1, Math.min(boundedScreenHeight, Math.floor(boundedScreenHeight * EMBEDDED_TERMINAL_SCREEN_RATIO)));
+  const width = boundedScreenWidth;
+  const height = boundedScreenHeight;
 
   return {
     cols: Math.max(width - 2, 1),
     height,
-    left: Math.max(Math.floor((boundedScreenWidth - width) / 2), 0),
+    left: 0,
     rows: Math.max(height - 2, 1),
-    top: Math.max(Math.floor((boundedScreenHeight - height) / 2), 0),
+    top: 0,
     width,
   };
 }
@@ -86,7 +85,7 @@ export function isStandaloneEscapeInput(input: Buffer | string): boolean {
 }
 
 export function getEmbeddedTerminalHint(ptyAlive: boolean): string {
-  return ptyAlive ? "Esc hide - t resume" : "exited - Esc return";
+  return ptyAlive ? "Esc hide" : "exited - Esc return";
 }
 
 export function resolveEmbeddedTerminalShell(
@@ -250,13 +249,6 @@ function getCellStyleTag(cell: ReturnType<HeadlessTerminal["buffer"]["active"]["
   return styleParts.join(",");
 }
 
-function buildBackdropContent(screenWidth: number, screenHeight: number): string {
-  const width = Math.max(Math.floor(screenWidth), 1);
-  const height = Math.max(Math.floor(screenHeight), 1);
-  const line = " ".repeat(width);
-  return Array.from({ length: height }, () => line).join("\n");
-}
-
 export function buildEmbeddedTerminalContent(
   terminal: HeadlessTerminal,
   { showCursor = true }: EmbeddedTerminalContentOptions = {},
@@ -349,15 +341,6 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     scrollback: 2_000,
   });
 
-  const backdropBox = blessed.box({
-    height: "100%",
-    left: 0,
-    mouse: false,
-    tags: false,
-    top: 0,
-    width: "100%",
-  });
-
   const terminalBox = blessed.box({
     border: "line",
     focusable: true,
@@ -367,7 +350,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     mouse: false,
     scrollable: false,
     style: {
-      border: { fg: "blue" },
+      border: { fg: UI_THEME.accent },
       fg: UI_THEME.text,
     },
     tags: true,
@@ -414,7 +397,6 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
 
   const updateLayout = () => {
     layout = calculateEmbeddedTerminalLayout(Number(screen.width), Number(screen.height));
-    backdropBox.setContent(buildBackdropContent(Number(screen.width), Number(screen.height)));
     terminalBox.top = layout.top;
     terminalBox.left = layout.left;
     terminalBox.width = layout.width;
@@ -465,9 +447,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
 
     visible = false;
     detachInputListener();
-    backdropBox.hide();
     terminalBox.hide();
-    screen.clearRegion(layout.left, layout.left + layout.width, layout.top, layout.top + layout.height);
     if (restoreMouseOnClose) {
       program.enableMouse();
     }
@@ -490,7 +470,6 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     if (restoreMouseOnClose) {
       program.disableMouse();
     }
-    backdropBox.show();
     terminalBox.show();
     attachInputListener();
     updateLayout();
@@ -543,10 +522,6 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
 
     terminal.dispose();
     terminalBox.destroy();
-    backdropBox.destroy();
-    if (visible) {
-      screen.clearRegion(layout.left, layout.left + layout.width, layout.top, layout.top + layout.height);
-    }
     if (visible && restoreMouseOnClose) {
       program.enableMouse();
     }
@@ -628,8 +603,6 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     return true;
   }
 
-  backdropBox.setContent(buildBackdropContent(Number(screen.width), Number(screen.height)));
-  screen.append(backdropBox);
   screen.append(terminalBox);
   if (restoreMouseOnClose) {
     program.disableMouse();
@@ -651,7 +624,6 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
       program.enableMouse();
     }
     terminal.dispose();
-    backdropBox.destroy();
     terminalBox.destroy();
     throw error;
   }

@@ -974,12 +974,12 @@ test("embedded terminal helpers resolve shell, layout, and hide/resume hints", a
   } = await import(path.join(projectRoot, "dist/lib.js"));
 
   assert.deepEqual(calculateEmbeddedTerminalLayout(100, 40), {
-    cols: 94,
-    height: 38,
-    left: 2,
-    rows: 36,
-    top: 1,
-    width: 96,
+    cols: 98,
+    height: 40,
+    left: 0,
+    rows: 38,
+    top: 0,
+    width: 100,
   });
   assert.deepEqual(calculateActionModalLayout(100, 40, true), {
     height: 12,
@@ -1072,7 +1072,7 @@ test("embedded terminal helpers resolve shell, layout, and hide/resume hints", a
   assert.equal(isStandaloneEscapeInput(Buffer.from([0x1b])), true);
   assert.equal(isStandaloneEscapeInput(Buffer.from("\x1b[A")), false);
   assert.equal(isStandaloneEscapeInput("x"), false);
-  assert.equal(getEmbeddedTerminalHint(true), "Esc hide - t resume");
+  assert.equal(getEmbeddedTerminalHint(true), "Esc hide");
   assert.equal(getEmbeddedTerminalHint(false), "exited - Esc return");
 
   const xtermHeadless = await import("@xterm/headless");
