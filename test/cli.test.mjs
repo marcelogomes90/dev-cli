@@ -659,9 +659,18 @@ async function createGitPullFixture(projectName) {
 
 test("buildShortcutLine shows restart and clear logs only when available", async () => {
   const {
+    buildFooterShortcutLine,
+    buildEmbeddedTerminalExitMessage,
     buildServiceContent,
+    buildTuiProgramOptions,
     buildHeaderContent,
+    buildShortcutItems,
     buildShortcutLine,
+    countLiveEmbeddedTerminalSessions,
+    detectTerminalThemeVariant,
+    formatActionModalInputValue,
+    getActiveEmbeddedTerminalSessionServices,
+    isLightTerminalBackground,
     collectProcessTreeResourceMetrics,
     computeCpuPercent,
     formatResourceMetrics,
@@ -670,6 +679,7 @@ test("buildShortcutLine shows restart and clear logs only when available", async
     parseProcessCpuTime,
     parseDarwinMemoryUsage,
     parseProcessResourceRows,
+    resolveUiTheme,
   } = await import(path.join(projectRoot, "dist/lib.js"));
 
   const runningSelected = {
@@ -699,17 +709,67 @@ test("buildShortcutLine shows restart and clear logs only when available", async
     status: "stopped",
   };
 
-  assert.match(buildShortcutLine(runningSelected, true), /\[r\] Restart/);
-  assert.match(buildShortcutLine(runningSelected, true), /\[c\] Clear logs/);
-  assert.match(buildShortcutLine(runningSelected, true), /\[t\] Terminal/);
-  assert.match(buildShortcutLine(runningSelected, true), /\[i\] Install/);
-  assert.match(buildShortcutLine(runningSelected, true), /\[p\] Pull/);
-  assert.match(buildShortcutLine(runningSelected, true), /\[d\] Branch/);
-  assert.doesNotMatch(buildShortcutLine(runningSelected, false), /\[c\] Clear logs/);
-  assert.doesNotMatch(buildShortcutLine(null, false), /\[t\] Terminal/);
-  assert.doesNotMatch(buildShortcutLine(stoppedSelected, true), /\[r\] Restart/);
-  assert.match(buildShortcutLine(stoppedSelected, true), /\[p\] Pull/);
-  assert.match(buildShortcutLine(stoppedSelected, true), /\[d\] Branch/);
+  assert.match(buildShortcutLine(runningSelected, true, true), /\[r\] Restart/);
+  assert.match(buildShortcutLine(runningSelected, true, true), /\[c\] Clear logs/);
+  assert.match(buildShortcutLine(runningSelected, true, true), /\[t\] Terminal/);
+  assert.match(buildShortcutLine(runningSelected, true, true), /\[i\] Install/);
+  assert.match(buildShortcutLine(runningSelected, true, true), /\[p\] Pull/);
+  assert.match(buildShortcutLine(runningSelected, true, true), /\[d\] Branch/);
+  assert.match(buildShortcutLine(runningSelected, true, true), /\[k\] Kill/);
+  assert.match(buildShortcutLine(runningSelected, true, true), /\[x\] Kill terminal/);
+  assert.match(buildShortcutLine(runningSelected, true, true), /\[\?\] Help/);
+  assert.doesNotMatch(buildShortcutLine(runningSelected, true, true), /\[↑\/↓ j\/k\] Move/);
+  assert.doesNotMatch(buildShortcutLine(runningSelected, false, false), /\[c\] Clear logs/);
+  assert.doesNotMatch(buildShortcutLine(runningSelected, false, false), /\[x\] Kill terminal/);
+  assert.doesNotMatch(buildShortcutLine(null, false, false), /\[t\] Terminal/);
+  assert.doesNotMatch(buildShortcutLine(stoppedSelected, true, false), /\[r\] Restart/);
+  assert.match(buildShortcutLine(stoppedSelected, true, false), /\[s\/Enter\] Start/);
+  assert.match(buildShortcutLine(stoppedSelected, true, false), /\[p\] Pull/);
+  assert.match(buildShortcutLine(stoppedSelected, true, false), /\[d\] Branch/);
+  assert.equal(
+    countLiveEmbeddedTerminalSessions(new Map([
+      ["api", { isAlive: () => true }],
+      ["worker", { isAlive: () => false }],
+      ["redis", { isAlive: () => true }],
+    ])),
+    2,
+  );
+  assert.equal(buildEmbeddedTerminalExitMessage(1), "Exit the UI and kill 1 embedded terminal session?");
+  assert.equal(buildEmbeddedTerminalExitMessage(2), "Exit the UI and kill 2 embedded terminal sessions?");
+  assert.deepEqual(
+    [...getActiveEmbeddedTerminalSessionServices(new Map([
+      ["api", { isAlive: () => true }],
+      ["worker", { isAlive: () => false }],
+      ["redis", { isAlive: () => true }],
+    ]))],
+    ["api", "redis"],
+  );
+  assert.equal(formatActionModalInputValue(""), "_");
+  assert.equal(formatActionModalInputValue("main"), "main_");
+  assert.equal(isLightTerminalBackground(15), true);
+  assert.equal(isLightTerminalBackground(0), false);
+  assert.equal(detectTerminalThemeVariant({ COLORFGBG: "15;0" }), "dark");
+  assert.equal(detectTerminalThemeVariant({ COLORFGBG: "0;15" }), "light");
+  assert.equal(resolveUiTheme({ COLORFGBG: "0;15" }).text, "#111827");
+  assert.deepEqual(buildTuiProgramOptions({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: "xterm-256color",
+  }), {
+    buffer: true,
+    extended: false,
+    input: process.stdin,
+    output: process.stdout,
+    terminal: "xterm-256color",
+    tput: true,
+    zero: true,
+  });
+  const compactFooterShortcutLine = buildFooterShortcutLine(buildShortcutItems(runningSelected, true, true), 52);
+  assert.match(compactFooterShortcutLine, /\[↑\/↓\] Move/);
+  assert.match(compactFooterShortcutLine, /\[k\] Kill/);
+  assert.match(compactFooterShortcutLine, /\[\?\] Help$/);
+  assert.doesNotMatch(compactFooterShortcutLine, /Kill terminal/);
+  assert.doesNotMatch(compactFooterShortcutLine, /Clear logs/);
 
   const layout = getSupervisorPaneLayout(100, 36);
   assert.equal(layout.servicesWidth, 100);
@@ -841,27 +901,73 @@ test("buildShortcutLine shows restart and clear logs only when available", async
     },
     "api",
     120,
+    new Map(),
+    new Set(["api"]),
   );
   const serviceText = stripBlessedTags(`${serviceRender.headerContent}\n${serviceRender.content}`);
   assert.match(serviceRender.content, /\{green-fg\}●\{\/green-fg\}\{cyan-fg\} RUNNING/u);
   assert.doesNotMatch(serviceRender.content, /\{green-fg\}● RUNNING/u);
   assert.match(serviceText, /\bMEM\b/);
   assert.match(serviceText, /\bCPU\b/);
+  assert.match(serviceText, /\bTERM\b/);
   assert.match(serviceText, /2G/);
   assert.match(serviceText, /12%/);
+  assert.match(serviceText, /\bON\b/);
   const workerLine = serviceText.split("\n").find((line) => line.includes("worker"));
   assert.ok(workerLine);
   assert.match(workerLine, /\s--\s+--\s+--\s*$/u);
+
+  const compactServiceRender = buildServiceContent(
+    {
+      configPath: "/tmp/.devrc.yml",
+      groups: { api: ["api"] },
+      pid: 1,
+      project: "amigo",
+      rootDir: "/tmp",
+      services: {
+        api: runningSelected,
+      },
+      socketPath: "/tmp/dev.sock",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    "api",
+    80,
+    new Map(),
+    new Set(["api"]),
+  );
+  assert.doesNotMatch(stripBlessedTags(`${compactServiceRender.headerContent}\n${compactServiceRender.content}`), /\bTERM\b/);
+
+  const narrowWideServiceRender = buildServiceContent(
+    {
+      configPath: "/tmp/.devrc.yml",
+      groups: { api: ["api"] },
+      pid: 1,
+      project: "amigo",
+      rootDir: "/tmp",
+      services: {
+        api: runningSelected,
+      },
+      socketPath: "/tmp/dev.sock",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    "api",
+    106,
+    new Map(),
+    new Set(["api"]),
+  );
+  assert.match(stripBlessedTags(narrowWideServiceRender.headerContent), /\bTERM\b/);
 });
 
-test("embedded terminal helpers resolve shell, layout, and close confirmation", async () => {
+test("embedded terminal helpers resolve shell, layout, and hide/resume hints", async () => {
   const {
     calculateActionModalLayout,
     buildEmbeddedTerminalEnvironment,
     buildEmbeddedTerminalContent,
     calculateEmbeddedTerminalLayout,
     ensureNodePtySpawnHelperExecutable,
-    getNextEmbeddedTerminalCloseTransition,
+    getEmbeddedTerminalHint,
     getNodePtySpawnHelperPath,
     isStandaloneEscapeInput,
     resolveEmbeddedTerminalShell,
@@ -876,11 +982,47 @@ test("embedded terminal helpers resolve shell, layout, and close confirmation", 
     width: 96,
   });
   assert.deepEqual(calculateActionModalLayout(100, 40, true), {
-    height: 11,
+    height: 12,
     left: 16,
     top: 14,
     width: 68,
   });
+  assert.deepEqual(calculateActionModalLayout(100, 40, false), {
+    height: 10,
+    left: 16,
+    top: 15,
+    width: 68,
+  });
+  assert.deepEqual(calculateActionModalLayout(
+    100,
+    40,
+    false,
+    "Install dependencies for api? The service will stop first and restart after success.",
+  ), {
+    height: 10,
+    left: 16,
+    top: 15,
+    width: 68,
+  });
+  assert.deepEqual(calculateActionModalLayout(
+    60,
+    40,
+    false,
+    "Install dependencies for api? The service will stop first and restart after success.",
+  ), {
+    height: 10,
+    left: 8,
+    top: 15,
+    width: 44,
+  });
+  const tallConfirmLayout = calculateActionModalLayout(
+    60,
+    40,
+    false,
+    "Install dependencies for api? The service will stop first and restart after success. ".repeat(5),
+  );
+  assert.equal(tallConfirmLayout.width, 44);
+  assert.equal(tallConfirmLayout.height > 10, true);
   assert.deepEqual(resolveEmbeddedTerminalShell({
     env: { SHELL: "/bin/zsh" },
     platform: "darwin",
@@ -930,23 +1072,8 @@ test("embedded terminal helpers resolve shell, layout, and close confirmation", 
   assert.equal(isStandaloneEscapeInput(Buffer.from([0x1b])), true);
   assert.equal(isStandaloneEscapeInput(Buffer.from("\x1b[A")), false);
   assert.equal(isStandaloneEscapeInput("x"), false);
-
-  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("idle", "escape", true), {
-    shouldClose: false,
-    state: "confirm",
-  });
-  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("confirm", "escape", true), {
-    shouldClose: true,
-    state: "confirm",
-  });
-  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("idle", "escape", false), {
-    shouldClose: true,
-    state: "idle",
-  });
-  assert.deepEqual(getNextEmbeddedTerminalCloseTransition("confirm", "input", true), {
-    shouldClose: false,
-    state: "idle",
-  });
+  assert.equal(getEmbeddedTerminalHint(true), "Esc hide - t resume");
+  assert.equal(getEmbeddedTerminalHint(false), "exited - Esc return");
 
   const xtermHeadless = await import("@xterm/headless");
   const { Terminal } = xtermHeadless.default;
@@ -974,6 +1101,17 @@ test("embedded terminal helpers resolve shell, layout, and close confirmation", 
   assert.equal(
     buildEmbeddedTerminalContent(colorTerminal, { showCursor: false }),
     "{1-fg}red{/}   ",
+  );
+
+  const underlinedTerminal = new Terminal({
+    allowProposedApi: true,
+    cols: 8,
+    rows: 1,
+  });
+  await new Promise((resolve) => underlinedTerminal.write("\u001b[4mtest\u001b[24m", resolve));
+  assert.doesNotMatch(
+    buildEmbeddedTerminalContent(underlinedTerminal, { showCursor: false }),
+    /underline/,
   );
 });
 

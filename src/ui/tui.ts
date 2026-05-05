@@ -34,30 +34,34 @@ import {
   type CpuSnapshot,
   type ResourceMetrics,
 } from "./metrics";
-import { buildServiceContent, buildShortcutLine, type ServiceRenderResult } from "./services";
+import {
+  buildServiceContent,
+  buildShortcutItems,
+  buildShortcutLine,
+  type ServiceRenderResult,
+  type ShortcutItem,
+} from "./services";
 import { muted, toneTag, truncate, UI_THEME, type MessageTone } from "./theme";
+export { detectTerminalThemeVariant, isLightTerminalBackground, resolveUiTheme, UI_THEME, type TerminalThemeVariant, type UiTheme } from "./theme";
 
 export {
   buildEmbeddedTerminalEnvironment,
   buildEmbeddedTerminalContent,
   calculateEmbeddedTerminalLayout,
   ensureNodePtySpawnHelperExecutable,
-  getNextEmbeddedTerminalCloseTransition,
+  getEmbeddedTerminalHint,
   getNodePtySpawnHelperPath,
   isStandaloneEscapeInput,
   resolveEmbeddedTerminalShell,
   type EmbeddedTerminalContentOptions,
-  type EmbeddedTerminalCloseEvent,
-  type EmbeddedTerminalCloseState,
-  type EmbeddedTerminalCloseTransition,
   type EmbeddedTerminalLayout,
   type EmbeddedTerminalShell,
 } from "./embedded-terminal";
 export { buildHeaderContent, getSupervisorPaneLayout, type SupervisorPaneLayout } from "./layout";
 export { buildLogViewerCommand, launchExternalLogViewer, type LogViewerCommand } from "./logs";
 export { computeCpuPercent, formatResourceMetrics, parseDarwinMemoryUsage, type CpuSnapshot, type ResourceMetrics } from "./metrics";
-export { buildServiceContent, buildShortcutLine, type ServiceRenderResult } from "./services";
-export { calculateActionModalLayout, type ActionModalLayout } from "./action-modal";
+export { buildServiceContent, buildShortcutItems, buildShortcutLine, type ServiceRenderResult, type ShortcutItem } from "./services";
+export { calculateActionModalLayout, formatActionModalInputValue, type ActionModalLayout } from "./action-modal";
 
 type UiMode = "modal" | "navigate" | "terminal";
 
@@ -70,6 +74,103 @@ const METRICS_REFRESH_MS = 1_000;
 const SCREEN_POLL_MS = 500;
 const SCREEN_RENDER_DEBOUNCE_MS = 16;
 const BACKGROUND_LOG_REFRESH_MS = 2_000;
+
+export interface TuiProgramOptions {
+  input?: NodeJS.ReadableStream;
+  output?: NodeJS.WritableStream;
+  terminal?: string;
+}
+
+export function buildTuiProgramOptions(
+  {
+    input = process.stdin,
+    output = process.stdout,
+    terminal = process.env.TERM || "xterm-256color",
+  }: TuiProgramOptions = {},
+) {
+  return {
+    buffer: true,
+    extended: false,
+    input: input as unknown as blessed.Widgets.IScreenOptions["input"],
+    output: output as unknown as blessed.Widgets.IScreenOptions["output"],
+    terminal,
+    tput: true,
+    zero: true,
+  } as unknown as Parameters<typeof blessed.program>[0];
+}
+
+export function countLiveEmbeddedTerminalSessions(
+  sessions: ReadonlyMap<string, Pick<EmbeddedTerminalController, "isAlive">>,
+): number {
+  let liveCount = 0;
+
+  for (const session of sessions.values()) {
+    if (session.isAlive()) {
+      liveCount += 1;
+    }
+  }
+
+  return liveCount;
+}
+
+export function buildEmbeddedTerminalExitMessage(liveSessionCount: number): string {
+  if (liveSessionCount === 1) {
+    return "Exit the UI and kill 1 embedded terminal session?";
+  }
+
+  return `Exit the UI and kill ${liveSessionCount} embedded terminal sessions?`;
+}
+
+export function getActiveEmbeddedTerminalSessionServices(
+  sessions: ReadonlyMap<string, Pick<EmbeddedTerminalController, "isAlive">>,
+): Set<string> {
+  const activeServices = new Set<string>();
+
+  for (const [serviceName, session] of sessions.entries()) {
+    if (session.isAlive()) {
+      activeServices.add(serviceName);
+    }
+  }
+
+  return activeServices;
+}
+
+export function buildFooterShortcutLine(
+  items: readonly ShortcutItem[],
+  availableWidth: number,
+): string {
+  const normalizedWidth = Math.max(availableWidth, 1);
+  const helpItem = items.find((item) => item.label === "[?] Help") ?? null;
+  const otherItems = items.filter((item) => item.label !== "[?] Help");
+  const helpWidth = helpItem ? helpItem.label.length : 0;
+  const reservedSeparatorWidth = helpItem && otherItems.length > 0 ? 3 : 0;
+  let remainingWidth = normalizedWidth - helpWidth - reservedSeparatorWidth;
+  const selectedItems: string[] = [];
+
+  for (const item of otherItems.sort((left, right) => right.priority - left.priority)) {
+    const separatorWidth = selectedItems.length > 0 ? 3 : 0;
+    const neededWidth = separatorWidth + item.label.length;
+    if (selectedItems.length === 0 && item.label.length > remainingWidth) {
+      continue;
+    }
+    if (neededWidth > remainingWidth) {
+      continue;
+    }
+
+    selectedItems.push(item.label);
+    remainingWidth -= neededWidth;
+  }
+
+  if (helpItem) {
+    selectedItems.push(helpItem.label);
+  }
+
+  return selectedItems.join(" | ");
+}
+
+function buildShortcutHelpContent(items: readonly ShortcutItem[]): string {
+  return items.map((item) => item.label).join("\n");
+}
 
 function formatActionMessage(response: SupervisorResponse, fallback: string): FooterMessage {
   if (!response.ok) {
@@ -99,6 +200,7 @@ function buildServiceRenderKey(
   screenWidth: number,
   screenHeight: number,
   logCacheVersion: number,
+  activeTerminalSessions: ReadonlySet<string>,
 ): string {
   const serviceParts: string[] = [];
   for (const [groupName, serviceNames] of Object.entries(state.groups)) {
@@ -130,6 +232,7 @@ function buildServiceRenderKey(
     screenHeight,
     logCacheVersion,
     Math.floor(Date.now() / 1000),
+    [...activeTerminalSessions].sort().join(","),
     ...serviceParts,
   ].join("|");
 }
@@ -137,8 +240,10 @@ function buildServiceRenderKey(
 export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
   await new Promise<void>((resolve) => {
     const initialPaneLayout = getSupervisorPaneLayout(process.stdout.columns ?? 120, process.stdout.rows ?? 32);
+    const program = blessed.program(buildTuiProgramOptions());
     const screen = blessed.screen({
       fullUnicode: true,
+      program,
       smartCSR: true,
       title: `dev ${config.project}`,
       useBCE: true,
@@ -253,7 +358,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     let lastRenderedSelectionKey: string | null = null;
     let mode: UiMode = "navigate";
     let footerMessage: FooterMessage = {
-      text: "UI connected. Use a to start services individually.",
+      text: "UI connected. Use s or Enter to start services individually.",
       tone: "info",
     };
     let selectedService: string | null = null;
@@ -264,7 +369,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     let renderTimer: NodeJS.Timeout | null = null;
     let screenClosed = false;
     let actionModal: ActionModalController | null = null;
-    let embeddedTerminal: EmbeddedTerminalController | null = null;
+    let visibleEmbeddedTerminalService: string | null = null;
     let lastModalInteractionAt = 0;
     let lastTerminalEscapeAt = 0;
     let lastMetricsRefreshAt = 0;
@@ -289,6 +394,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     const logRefreshes = new Map<string, Promise<void>>();
     const pendingRefreshes = new Set<string>();
     const pendingServiceActions = new Map<string, string>();
+    const embeddedTerminalSessions = new Map<string, EmbeddedTerminalController>();
 
     const setFooterMessage = (tone: MessageTone, text: string) => {
       footerMessage = { text, tone };
@@ -338,6 +444,82 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       }
 
       return pendingServiceActions.get(selectedService) ?? null;
+    };
+
+    const getVisibleEmbeddedTerminal = (): EmbeddedTerminalController | null => {
+      if (!visibleEmbeddedTerminalService) {
+        return null;
+      }
+
+      return embeddedTerminalSessions.get(visibleEmbeddedTerminalService) ?? null;
+    };
+
+    const getLiveEmbeddedTerminalCount = (): number => countLiveEmbeddedTerminalSessions(embeddedTerminalSessions);
+    const getActiveEmbeddedTerminalServices = (): Set<string> => getActiveEmbeddedTerminalSessionServices(embeddedTerminalSessions);
+    const hasActiveEmbeddedTerminalSession = (serviceName: string | null): boolean => {
+      if (!serviceName) {
+        return false;
+      }
+
+      return embeddedTerminalSessions.get(serviceName)?.isAlive() ?? false;
+    };
+
+    const hideVisibleEmbeddedTerminal = ({
+      notify = true,
+      render = false,
+    }: {
+      notify?: boolean;
+      render?: boolean;
+    } = {}) => {
+      const visibleTerminal = getVisibleEmbeddedTerminal();
+      if (!visibleTerminal) {
+        visibleEmbeddedTerminalService = null;
+        return;
+      }
+
+      visibleEmbeddedTerminalService = null;
+      visibleTerminal.hide({ notify, render });
+    };
+
+    const destroyEmbeddedTerminalSession = (
+      serviceName: string,
+      {
+        kill = true,
+        notify = false,
+        render = false,
+      }: {
+        kill?: boolean;
+        notify?: boolean;
+        render?: boolean;
+      } = {},
+    ) => {
+      const session = embeddedTerminalSessions.get(serviceName);
+      if (!session) {
+        if (visibleEmbeddedTerminalService === serviceName) {
+          visibleEmbeddedTerminalService = null;
+        }
+        return;
+      }
+
+      if (visibleEmbeddedTerminalService === serviceName) {
+        visibleEmbeddedTerminalService = null;
+      }
+      embeddedTerminalSessions.delete(serviceName);
+      session.destroy({ kill, notify, render });
+    };
+
+    const destroyAllEmbeddedTerminalSessions = ({
+      kill = true,
+      notify = false,
+      render = false,
+    }: {
+      kill?: boolean;
+      notify?: boolean;
+      render?: boolean;
+    } = {}) => {
+      for (const serviceName of [...embeddedTerminalSessions.keys()]) {
+        destroyEmbeddedTerminalSession(serviceName, { kill, notify, render });
+      }
     };
 
     const guardSelectedServiceIdle = (actionLabel: string): boolean => {
@@ -428,16 +610,28 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       const message = footerMessage.text;
       const busyAction = getSelectedBusyAction();
       const tone = busyAction ? "warning" : footerMessage.tone;
-      const shortcuts =
-        mode === "terminal"
-          ? "[Esc] Close terminal"
-          : busyAction
-            ? `[↑/↓ j/k] Move | ${selected?.service} busy: ${busyAction} | [v] View logs | [q] Quit`
-            : buildShortcutLine(selected, selectedHasLogs());
       const footerInset = Number(screen.width) > 48 ? 2 : 1;
       const inset = " ".repeat(footerInset);
       const availableWidth = Math.max(Number(screen.width) - 2 - footerInset * 2, 10);
-      const content = `${inset}{${toneTag(tone)}}${truncate(message, availableWidth).trimEnd()}{/${toneTag(tone)}}\n${inset}${muted(truncate(shortcuts, availableWidth).trimEnd())}`;
+      const shortcuts =
+        mode === "terminal"
+          ? "[Esc] Hide terminal"
+          : busyAction
+            ? buildFooterShortcutLine([
+              { label: "[↑/↓] Move", priority: 100 },
+              { label: "[v] View logs", priority: 65 },
+              { label: "[q] Quit", priority: 64 },
+              { label: "[?] Help", priority: 63 },
+            ], availableWidth)
+            : buildFooterShortcutLine(
+              buildShortcutItems(
+                selected,
+                selectedHasLogs(),
+                hasActiveEmbeddedTerminalSession(selected?.service ?? null),
+              ),
+              availableWidth,
+            );
+      const content = `${inset}{${toneTag(tone)}}${truncate(message, availableWidth).trimEnd()}{/${toneTag(tone)}}\n${inset}${muted(shortcuts.trimEnd())}`;
       if (content === lastFooterContent) {
         return false;
       }
@@ -574,13 +768,16 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
             logCacheVersion += 1;
           }
           if (cacheChanged && state) {
-            dirty = applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches)) || dirty;
+            dirty = applyServiceRender(
+              buildServiceContent(state, selectedService, Number(screen.width), logCaches, getActiveEmbeddedTerminalServices()),
+            ) || dirty;
             lastRenderedSelectionKey = buildServiceRenderKey(
               state,
               selectedService,
               Number(screen.width),
               Number(screen.height),
               logCacheVersion,
+              getActiveEmbeddedTerminalServices(),
             );
           }
           if (selectedService === serviceName) {
@@ -718,16 +915,24 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         const selectedChanged = nextSelected !== selectedService;
         selectedService = nextSelected;
 
+        const activeEmbeddedTerminalServices = getActiveEmbeddedTerminalServices();
         const serviceRenderKey = buildServiceRenderKey(
           state,
           selectedService,
           Number(screen.width),
           Number(screen.height),
           logCacheVersion,
+          activeEmbeddedTerminalServices,
         );
         let currentServiceRender = lastServiceRender;
         if (serviceRenderKey !== lastRenderedSelectionKey || !currentServiceRender) {
-          currentServiceRender = buildServiceContent(state, selectedService, Number(screen.width), logCaches);
+          currentServiceRender = buildServiceContent(
+            state,
+            selectedService,
+            Number(screen.width),
+            logCaches,
+            activeEmbeddedTerminalServices,
+          );
           dirty = applyServiceRender(currentServiceRender) || dirty;
           lastRenderedSelectionKey = serviceRenderKey;
         }
@@ -778,7 +983,9 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       selectedService = serviceNames[nextIndex] ?? selectedService;
       if (state) {
         logPinnedToBottom = true;
-        let dirty = applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches));
+        let dirty = applyServiceRender(
+          buildServiceContent(state, selectedService, Number(screen.width), logCaches, getActiveEmbeddedTerminalServices()),
+        );
         dirty = applyLogContent(selectedService) || dirty;
         if (selectedService) {
           refreshLogCache(selectedService);
@@ -807,13 +1014,16 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       logCacheVersion += 1;
       logPinnedToBottom = true;
       if (state) {
-        applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches));
+        applyServiceRender(
+          buildServiceContent(state, selectedService, Number(screen.width), logCaches, getActiveEmbeddedTerminalServices()),
+        );
         lastRenderedSelectionKey = buildServiceRenderKey(
           state,
           selectedService,
           Number(screen.width),
           Number(screen.height),
           logCacheVersion,
+          getActiveEmbeddedTerminalServices(),
         );
       }
       applyLogContent(serviceName);
@@ -872,6 +1082,44 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       });
     };
 
+    const openShortcutHelpModal = () => {
+      if (actionModal) {
+        actionModal.destroy({ notify: false, render: false });
+      }
+
+      const selected = getSelectedService();
+      const shortcutItems = mode === "terminal"
+        ? [
+          { label: "[Esc] Hide terminal", priority: 100 },
+          { label: "[?] Help", priority: 99 },
+        ]
+        : mode === "navigate"
+          ? buildShortcutItems(
+            selected,
+            selectedHasLogs(),
+            hasActiveEmbeddedTerminalSession(selected?.service ?? null),
+          )
+          : [];
+
+      mode = "modal";
+      actionModal = openActionModal({
+        closeKeys: ["?", "enter", "escape", "q"],
+        message: buildShortcutHelpContent(shortcutItems),
+        mode: "info",
+        onCancel: () => {
+          lastModalInteractionAt = Date.now();
+          actionModal = null;
+          mode = "navigate";
+          servicesBox.focus();
+          renderFooter();
+          requestScreenRender(true);
+        },
+        onConfirm: () => {},
+        screen,
+        title: "Shortcuts",
+      });
+    };
+
     const startBranchPrompt = () => {
       if (!guardSelectedServiceIdle("switching branch")) {
         return;
@@ -893,7 +1141,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       openServiceActionModal({
         cancelMessage: "Branch change cancelled.",
         confirmLabel: "Checkout",
-        initialValue: selected.branch === "-" ? "" : selected.branch,
+        initialValue: "",
         inputLabel: "Branch",
         message: `Switch ${selected.service} to another branch.`,
         onConfirm: (value) => {
@@ -990,26 +1238,51 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return;
       }
 
+      hideVisibleEmbeddedTerminal({ notify: false, render: false });
+
+      const existingSession = embeddedTerminalSessions.get(service.service);
+      if (existingSession) {
+        if (existingSession.isAlive()) {
+          visibleEmbeddedTerminalService = service.service;
+          mode = "terminal";
+          existingSession.show();
+          setFooterMessage("info", `Terminal resumed for ${service.service} in ${service.cwd}.`);
+          renderFooter();
+          requestScreenRender(true);
+          return;
+        }
+
+        destroyEmbeddedTerminalSession(service.service, {
+          kill: false,
+          notify: false,
+          render: false,
+        });
+      }
+
       try {
         mode = "terminal";
-        embeddedTerminal = openEmbeddedTerminal({
+        visibleEmbeddedTerminalService = service.service;
+        const session = openEmbeddedTerminal({
           cwd: service.cwd,
           screen,
           serviceName: service.service,
           onEscapeInput: () => {
             lastTerminalEscapeAt = Date.now();
           },
-          onClose: () => {
-            embeddedTerminal = null;
+          onHide: () => {
+            if (visibleEmbeddedTerminalService === service.service) {
+              visibleEmbeddedTerminalService = null;
+            }
             mode = "navigate";
             servicesBox.focus();
-            setFooterMessage("info", `Terminal closed for ${service.service}.`);
+            setFooterMessage("info", `Terminal hidden for ${service.service}. Press t to resume.`);
             void render();
           },
         });
+        embeddedTerminalSessions.set(service.service, session);
       } catch (error) {
         mode = "navigate";
-        embeddedTerminal = null;
+        visibleEmbeddedTerminalService = null;
         setFooterMessage(
           "error",
           `Unable to open terminal for ${service.service}: ${getErrorMessage(error)}`,
@@ -1021,6 +1294,40 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       setFooterMessage("info", `Terminal open for ${service.service} in ${service.cwd}.`);
       renderFooter();
       requestScreenRender(true);
+    };
+
+    const killEmbeddedTerminalSessionForSelectedService = () => {
+      const service = getSelectedService();
+      if (!service) {
+        setFooterMessage("warning", "No service selected.");
+        void render();
+        return;
+      }
+
+      const session = embeddedTerminalSessions.get(service.service);
+      if (!session || !session.isAlive()) {
+        if (session) {
+          destroyEmbeddedTerminalSession(service.service, {
+            kill: false,
+            notify: false,
+            render: false,
+          });
+        }
+
+        setFooterMessage("warning", `${service.service} has no active terminal session.`);
+        void render();
+        return;
+      }
+
+      destroyEmbeddedTerminalSession(service.service, {
+        kill: true,
+        notify: false,
+        render: false,
+      });
+      mode = "navigate";
+      servicesBox.focus();
+      setFooterMessage("success", `Killed terminal for ${service.service}.`);
+      void render();
     };
 
     const scrollLogs = (offset: number) => {
@@ -1065,7 +1372,9 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         } else if (actionName === "stop") {
           state.services[serviceName].status = "stopping";
         }
-        applyServiceRender(buildServiceContent(state, selectedService, Number(screen.width), logCaches));
+        applyServiceRender(
+          buildServiceContent(state, selectedService, Number(screen.width), logCaches, getActiveEmbeddedTerminalServices()),
+        );
         applyLogContent(selectedService);
       }
       renderFooter();
@@ -1124,7 +1433,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       }
 
       if (action === "stop" && selected.status !== "running" && selected.status !== "starting" && selected.status !== "failed") {
-        setFooterMessage("warning", `${selected.service} cannot be stopped from status ${selected.status}.`);
+        setFooterMessage("warning", `${selected.service} cannot be killed from status ${selected.status}.`);
         void render();
         return;
       }
@@ -1175,7 +1484,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
             ? `Restart ${selected.service}`
             : action === "clear-logs"
               ? `Clear logs for ${selected.service}`
-              : `Stop ${selected.service}`;
+              : `Kill ${selected.service}`;
       if (action === "start" || action === "restart") {
         clearServiceLogCache(selected.service, selected.logPath);
       }
@@ -1223,10 +1532,28 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     const closeScreen = () => {
       actionModal?.destroy({ notify: false, render: false });
       actionModal = null;
-      embeddedTerminal?.destroy({ notify: false, render: false });
-      embeddedTerminal = null;
+      destroyAllEmbeddedTerminalSessions({ notify: false, render: false });
       screen.destroy();
       resolve();
+    };
+
+    const requestCloseScreen = () => {
+      const liveEmbeddedTerminalCount = getLiveEmbeddedTerminalCount();
+      if (liveEmbeddedTerminalCount === 0) {
+        closeScreen();
+        return;
+      }
+
+      openServiceActionModal({
+        cancelMessage: "Exit cancelled.",
+        confirmLabel: "Exit UI",
+        message: buildEmbeddedTerminalExitMessage(liveEmbeddedTerminalCount),
+        onConfirm: () => {
+          destroyAllEmbeddedTerminalSessions({ notify: false, render: false });
+          closeScreen();
+        },
+        title: "Exit UI",
+      });
     };
 
     servicesFrameBox.on("wheelup", () => moveSelection(-1));
@@ -1242,12 +1569,12 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       scrollLogs(2);
     });
 
-    screen.key(["up", "k"], () => {
+    screen.key(["up"], () => {
       if (mode === "navigate") {
         moveSelection(-1);
       }
     });
-    screen.key(["down", "j"], () => {
+    screen.key(["down"], () => {
       if (mode === "navigate") {
         moveSelection(1);
       }
@@ -1295,17 +1622,17 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         void pullSelectedBranch();
       }
     });
-    screen.key(["a"], () => {
-      if (mode === "navigate") {
-        void runSelectedServiceAction("start");
-      }
-    });
     screen.key(["i"], () => {
       if (mode === "navigate") {
         void runSelectedServiceAction("install");
       }
     });
     screen.key(["s"], () => {
+      if (mode === "navigate") {
+        void runSelectedServiceAction("start");
+      }
+    });
+    screen.key(["k"], () => {
       if (mode === "navigate") {
         void runSelectedServiceAction("stop");
       }
@@ -1318,6 +1645,16 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     screen.key(["c"], () => {
       if (mode === "navigate") {
         void runSelectedServiceAction("clear-logs");
+      }
+    });
+    screen.key(["x"], () => {
+      if (mode === "navigate") {
+        killEmbeddedTerminalSessionForSelectedService();
+      }
+    });
+    screen.key(["?"], () => {
+      if (mode === "navigate") {
+        openShortcutHelpModal();
       }
     });
     screen.key(["e"], () => {
@@ -1364,12 +1701,12 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     });
     screen.key(["q"], () => {
       if (mode === "navigate") {
-        closeScreen();
+        requestCloseScreen();
       }
     });
     screen.key(["C-c"], () => {
       if (mode !== "terminal") {
-        closeScreen();
+        requestCloseScreen();
       }
     });
     screen.key(["escape"], () => {
@@ -1379,7 +1716,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
 
       if (mode === "terminal") {
         lastTerminalEscapeAt = Date.now();
-        embeddedTerminal?.requestClose();
+        hideVisibleEmbeddedTerminal({ render: false });
         return;
       }
 
@@ -1391,7 +1728,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return;
       }
 
-      closeScreen();
+      requestCloseScreen();
     });
     screen.on("keypress", (ch, key) => {
       if (mode !== "modal") {
@@ -1403,7 +1740,11 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     });
     screen.on("resize", () => {
       actionModal?.resize();
-      embeddedTerminal?.resize();
+      for (const session of embeddedTerminalSessions.values()) {
+        if (session.isVisible()) {
+          session.resize();
+        }
+      }
       void render();
     });
 
@@ -1415,8 +1756,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       screenClosed = true;
       actionModal?.destroy({ notify: false, render: false });
       actionModal = null;
-      embeddedTerminal?.destroy({ notify: false, render: false });
-      embeddedTerminal = null;
+      destroyAllEmbeddedTerminalSessions({ notify: false, render: false });
+      visibleEmbeddedTerminalService = null;
       if (renderTimer) {
         clearTimeout(renderTimer);
         renderTimer = null;

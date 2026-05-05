@@ -13,6 +13,11 @@ export interface ServiceRenderResult {
   totalServices: number;
 }
 
+export interface ShortcutItem {
+  label: string;
+  priority: number;
+}
+
 function colorStatusIndicator(status: ManagedServiceState["status"], value: string): string {
   switch (status) {
     case "running":
@@ -127,22 +132,26 @@ export function buildServiceContent(
   selectedService: string | null,
   screenWidth: number,
   logSizes: ReadonlyMap<string, LogCache> = new Map(),
+  activeTerminalSessions: ReadonlySet<string> = new Set(),
 ): ServiceRenderResult {
   const innerWidth = getServicesInnerWidth(screenWidth);
   const markerWidth = 2;
   const compact = innerWidth < 84;
-  const showGroup = innerWidth >= 104;
+  const showWideMetadata = innerWidth >= 104;
+  const showGroup = showWideMetadata;
+  const showTerminalState = showWideMetadata;
   const statusWidth = compact ? 10 : 12;
   const groupWidth = showGroup ? 10 : 0;
-  const pidWidth = innerWidth >= 104 ? 7 : 6;
-  const uptimeWidth = innerWidth >= 104 ? 9 : 8;
-  const memoryWidth = innerWidth >= 104 ? 8 : 7;
+  const pidWidth = showWideMetadata ? 7 : 6;
+  const uptimeWidth = showWideMetadata ? 9 : 8;
+  const memoryWidth = showWideMetadata ? 8 : 7;
   const cpuWidth = 5;
-  const logWidth = innerWidth >= 104 ? 7 : 6;
+  const logWidth = showWideMetadata ? 7 : 6;
+  const terminalWidth = showTerminalState ? 4 : 0;
   const compactBranchWidth = Math.min(Math.max(Math.floor(innerWidth * 0.24), 10), 18);
   const compactServiceWidth = Math.max(innerWidth - markerWidth - statusWidth - compactBranchWidth - 2, 12);
-  const metadataWidth = statusWidth + groupWidth + pidWidth + uptimeWidth + memoryWidth + cpuWidth + logWidth;
-  const separatorWidth = showGroup ? 8 : 7;
+  const metadataWidth = statusWidth + groupWidth + pidWidth + uptimeWidth + memoryWidth + cpuWidth + logWidth + terminalWidth;
+  const separatorWidth = showGroup ? (showTerminalState ? 10 : 8) : 7;
   const availableWidth = Math.max(
     innerWidth - markerWidth - metadataWidth - separatorWidth,
     26,
@@ -152,7 +161,7 @@ export function buildServiceContent(
     : Math.min(Math.max(Math.floor(availableWidth * 0.38), 16), 24);
   const branchWidth = compact
     ? compactBranchWidth
-    : Math.max(availableWidth - serviceWidth, 10);
+    : Math.max(availableWidth - serviceWidth - 1, 10);
 
   const lines: string[] = [];
   const serviceLineByName = new Map<string, number>();
@@ -164,7 +173,7 @@ export function buildServiceContent(
   const header = compact
     ? `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("BRANCH", branchWidth)}`
     : showGroup
-      ? `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("GROUP", groupWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)} ${truncate("UPTIME", uptimeWidth)} ${truncate("MEM", memoryWidth)} ${truncate("CPU", cpuWidth)} ${truncate("LOG", logWidth)}`
+      ? `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("GROUP", groupWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)} ${truncate("UPTIME", uptimeWidth)} ${truncate("MEM", memoryWidth)} ${truncate("CPU", cpuWidth)} ${truncate("LOG", logWidth)} ${truncate("TERM", terminalWidth)}`
       : `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)} ${truncate("UPTIME", uptimeWidth)} ${truncate("MEM", memoryWidth)} ${truncate("CPU", cpuWidth)} ${truncate("LOG", logWidth)}`;
   const headerContent = fg(UI_THEME.tableHeader, header);
 
@@ -194,6 +203,10 @@ export function buildServiceContent(
       const memory = fg(rowColor, formatServiceMemory(service, memoryWidth));
       const cpu = fg(rowColor, formatServiceCpu(service, cpuWidth));
       const logSize = fg(rowColor, formatServiceLogSize(logSizes.get(service.service)?.size, logWidth));
+      const terminalState = fg(
+        rowColor,
+        truncate(activeTerminalSessions.has(service.service) ? "ON" : "--", Math.max(terminalWidth, 1)),
+      );
 
       serviceLineByName.set(service.service, lines.length);
       serviceNames.push(service.service);
@@ -201,7 +214,7 @@ export function buildServiceContent(
         compact
           ? `${marker}${name} ${status} ${branch}`
           : showGroup
-            ? `${marker}${name} ${status} ${group} ${branch} ${pid} ${uptime} ${memory} ${cpu} ${logSize}`
+            ? `${marker}${name} ${status} ${group} ${branch} ${pid} ${uptime} ${memory} ${cpu} ${logSize} ${terminalState}`
             : `${marker}${name} ${status} ${branch} ${pid} ${uptime} ${memory} ${cpu} ${logSize}`,
       );
     }
@@ -220,8 +233,16 @@ export function buildServiceContent(
   };
 }
 
-export function buildShortcutLine(selected: ManagedServiceState | null, hasLogs = false): string {
-  const shortcuts = ["[↑/↓ j/k] Move"];
+function formatShortcutLabel(label: string): string {
+  return label;
+}
+
+export function buildShortcutItems(
+  selected: ManagedServiceState | null,
+  hasLogs = false,
+  hasActiveTerminalSession = false,
+): ShortcutItem[] {
+  const shortcuts: ShortcutItem[] = [{ label: "[↑/↓] Move", priority: 100 }];
   const canInstall = selected?.installCommand && (
     selected.status === "stopped" ||
     selected.status === "failed" ||
@@ -234,37 +255,59 @@ export function buildShortcutLine(selected: ManagedServiceState | null, hasLogs 
   );
 
   if (selected && (selected.status === "stopped" || selected.status === "failed")) {
-    shortcuts.push("[a] Start");
+    shortcuts.push({ label: "[s/Enter] Start", priority: 95 });
   }
 
   if (canInstall) {
-    shortcuts.push("[i] Install");
+    shortcuts.push({ label: "[i] Install", priority: 92 });
   }
 
-  if (selected && (selected.status === "running" || selected.status === "starting")) {
-    shortcuts.push("[s] Stop");
+  if (selected && (selected.status === "running" || selected.status === "starting" || selected.status === "failed")) {
+    shortcuts.push({ label: "[k] Kill", priority: 94 });
   }
 
   if (selected?.status === "running") {
-    shortcuts.push("[r] Restart");
+    shortcuts.push({ label: "[r] Restart", priority: 90 });
   }
 
   if (canUseGit) {
-    shortcuts.push("[p] Pull");
+    shortcuts.push({ label: "[p] Pull", priority: 80 });
   }
 
   if (canUseGit) {
-    shortcuts.push("[d] Branch");
+    shortcuts.push({ label: "[d] Branch", priority: 78 });
   }
 
   if (hasLogs) {
-    shortcuts.push("[c] Clear logs");
+    shortcuts.push({ label: "[c] Clear logs", priority: 70 });
   }
 
   if (selected) {
-    shortcuts.push("[e] Editor", "[t] Terminal");
+    shortcuts.push(
+      { label: "[e] Editor", priority: 68 },
+      { label: "[t] Terminal", priority: 67 },
+    );
   }
 
-  shortcuts.push("[v] View logs", "[q] Quit");
-  return shortcuts.join(" | ");
+  if (hasActiveTerminalSession) {
+    shortcuts.push({ label: "[x] Kill terminal", priority: 66 });
+  }
+
+  shortcuts.push(
+    { label: "[v] View logs", priority: 65 },
+    { label: "[q] Quit", priority: 64 },
+    { label: "[?] Help", priority: 63 },
+  );
+
+  return shortcuts;
+}
+
+export function buildShortcutLine(
+  selected: ManagedServiceState | null,
+  hasLogs = false,
+  hasActiveTerminalSession = false,
+): string {
+  return buildShortcutItems(selected, hasLogs, hasActiveTerminalSession)
+    .map((shortcut) => formatShortcutLabel(shortcut.label))
+    .join(" | ");
 }

@@ -1,5 +1,5 @@
 import blessed, { type Widgets } from "blessed";
-import { bold, fg, muted, toneTag, truncate, UI_THEME } from "./theme";
+import { bold, fg, toneTag, truncate, UI_THEME } from "./theme";
 
 export interface ActionModalLayout {
   height: number;
@@ -10,10 +10,12 @@ export interface ActionModalLayout {
 
 export interface ActionModalOptions {
   cancelLabel?: string;
+  closeKeys?: string[];
   confirmLabel?: string;
   initialValue?: string;
   inputLabel?: string;
   message: string;
+  mode?: "action" | "info";
   onCancel(): void;
   onConfirm(value: string): void;
   screen: Widgets.Screen;
@@ -32,10 +34,20 @@ export interface ActionModalController {
 const ACTION_MODAL_SCREEN_RATIO = 0.68;
 type ActionButton = "cancel" | "confirm";
 
+const ACTION_MODAL_MIN_HEIGHT = {
+  action: {
+    confirm: 10,
+    input: 12,
+  },
+  info: 6,
+} as const;
+
 export function calculateActionModalLayout(
   screenWidth: number,
   screenHeight: number,
   hasInput: boolean,
+  message = "",
+  mode: "action" | "info" = "action",
 ): ActionModalLayout {
   const boundedScreenWidth = Math.max(Math.floor(screenWidth), 1);
   const boundedScreenHeight = Math.max(Math.floor(screenHeight), 1);
@@ -43,7 +55,18 @@ export function calculateActionModalLayout(
     Math.max(Math.floor(boundedScreenWidth * ACTION_MODAL_SCREEN_RATIO), 44),
     Math.min(84, boundedScreenWidth),
   );
-  const height = Math.min(hasInput ? 11 : 9, boundedScreenHeight);
+  const messageHeight = getWrappedLineCount(message, Math.max(width - 4, 1));
+  const dynamicHeight = mode === "info"
+    ? messageHeight + 4
+    : hasInput
+      ? messageHeight + 8
+      : messageHeight + 5;
+  const minimumHeight = mode === "info"
+    ? ACTION_MODAL_MIN_HEIGHT.info
+    : hasInput
+      ? ACTION_MODAL_MIN_HEIGHT.action.input
+      : ACTION_MODAL_MIN_HEIGHT.action.confirm;
+  const height = Math.min(Math.max(dynamicHeight, minimumHeight), boundedScreenHeight);
 
   return {
     height,
@@ -60,12 +83,51 @@ function buildBackdropContent(screenWidth: number, screenHeight: number): string
   return Array.from({ length: height }, () => line).join("\n");
 }
 
-function formatInputValue(value: string, placeholder: string): string {
-  if (!value) {
-    return muted(placeholder);
+export function formatActionModalInputValue(value: string): string {
+  return value ? `${value}_` : "_";
+}
+
+function getWrappedLineCount(text: string, width: number): number {
+  const availableWidth = Math.max(width, 1);
+  let total = 0;
+
+  for (const rawLine of text.split("\n")) {
+    if (rawLine.length === 0) {
+      total += 1;
+      continue;
+    }
+
+    let remaining = rawLine;
+    while (remaining.length > availableWidth) {
+      let breakIndex = remaining.lastIndexOf(" ", availableWidth);
+      if (breakIndex <= 0) {
+        breakIndex = availableWidth;
+      }
+
+      total += 1;
+      remaining = remaining.slice(breakIndex).trimStart();
+      if (remaining.length === 0) {
+        break;
+      }
+      if (remaining.length <= availableWidth) {
+        total += 1;
+        remaining = "";
+      }
+    }
+
+    if (remaining.length > 0 && remaining.length <= availableWidth) {
+      total += 1;
+    }
   }
 
-  return `${value}_`;
+  return Math.max(total, 1);
+}
+
+function centerText(value: string, width: number): string {
+  const availableWidth = Math.max(width, value.length);
+  const leftPadding = Math.floor((availableWidth - value.length) / 2);
+  const rightPadding = availableWidth - value.length - leftPadding;
+  return `${" ".repeat(leftPadding)}${value}${" ".repeat(rightPadding)}`;
 }
 
 function renderActionButton(
@@ -73,49 +135,57 @@ function renderActionButton(
   {
     disabled = false,
     selected = false,
+    width = label.length,
     tone = "info",
   }: {
     disabled?: boolean;
     selected?: boolean;
+    width?: number;
     tone?: "danger" | "info";
   } = {},
 ): string {
+  const content = `  ${centerText(label, width)}  `;
+
   if (disabled) {
-    return `{black-fg}{#5f667a-bg}  ${label}  {/}`;
+    return `{${UI_THEME.buttonDisabledText}-fg}{${UI_THEME.buttonDisabledBackground}-bg}${content}{/}`;
   }
 
   if (selected) {
     const background = tone === "danger" ? UI_THEME.danger : UI_THEME.accent;
-    return `{black-fg}{${background}-bg}  ${label}  {/}`;
+    return `{${UI_THEME.buttonSelectedText}-fg}{${background}-bg}${content}{/}`;
   }
 
   const foreground = tone === "danger" ? UI_THEME.danger : UI_THEME.text;
-  return `{${foreground}-fg}${label}{/${foreground}-fg}`;
+  return `{${foreground}-fg}${content}{/${foreground}-fg}`;
 }
 
 function renderInputLine(label: string, value: string): string {
-  return `${fg(UI_THEME.tableHeader, `${label}:`)} ${formatInputValue(value, "required")}`;
+  return `${fg(UI_THEME.tableHeader, `${label}:`)} ${formatActionModalInputValue(value)}`;
 }
 
 export function openActionModal(options: ActionModalOptions): ActionModalController {
   const {
     cancelLabel = "Cancel",
+    closeKeys,
     confirmLabel = "Confirm",
     initialValue = "",
     inputLabel,
     message,
+    mode = "action",
     onCancel,
     onConfirm,
     screen,
     title,
     validate,
   } = options;
-  const hasInput = Boolean(inputLabel);
+  const hasInput = mode === "action" && Boolean(inputLabel);
+  const hasButtons = mode === "action";
+  const modalCloseKeys = new Set(closeKeys ?? (mode === "info" ? ["?", "enter", "escape", "q"] : ["escape"]));
   let closed = false;
   let errorMessage = "";
   let inputValue = initialValue;
   let selectedButton: ActionButton = "confirm";
-  let layout = calculateActionModalLayout(Number(screen.width), Number(screen.height), hasInput);
+  let layout = calculateActionModalLayout(Number(screen.width), Number(screen.height), hasInput, message, mode);
 
   const backdropBox = blessed.box({
     height: "100%",
@@ -141,8 +211,10 @@ export function openActionModal(options: ActionModalOptions): ActionModalControl
   });
 
   const messageBox = blessed.box({
-    height: 2,
+    height: 1,
     left: 2,
+    mouse: false,
+    scrollable: false,
     tags: true,
     top: 1,
     width: Math.max(layout.width - 4, 1),
@@ -154,7 +226,7 @@ export function openActionModal(options: ActionModalOptions): ActionModalControl
     hidden: !hasInput,
     left: 2,
     tags: true,
-    top: 4,
+    top: 5,
     width: Math.max(layout.width - 4, 1),
   });
 
@@ -162,7 +234,7 @@ export function openActionModal(options: ActionModalOptions): ActionModalControl
     height: 1,
     left: 2,
     tags: true,
-    top: hasInput ? 5 : 4,
+    top: hasInput ? 6 : 5,
     width: Math.max(layout.width - 4, 1),
   });
 
@@ -171,7 +243,7 @@ export function openActionModal(options: ActionModalOptions): ActionModalControl
     height: 1,
     left: 2,
     tags: true,
-    top: hasInput ? 7 : 6,
+    top: hasInput ? 8 : 7,
     width: Math.max(layout.width - 4, 1),
   });
 
@@ -179,40 +251,71 @@ export function openActionModal(options: ActionModalOptions): ActionModalControl
   if (hasInput) {
     modalBox.append(inputBox);
   }
-  modalBox.append(errorBox);
-  modalBox.append(buttonBox);
+  if (hasButtons) {
+    modalBox.append(errorBox);
+    modalBox.append(buttonBox);
+  }
 
   const getValidationMessage = () => validate?.(inputValue) ?? null;
   const canConfirm = () => getValidationMessage() === null;
 
   const updateLayout = () => {
-    layout = calculateActionModalLayout(Number(screen.width), Number(screen.height), hasInput);
+    layout = calculateActionModalLayout(Number(screen.width), Number(screen.height), hasInput, message, mode);
+    const messageHeight = Math.max(getWrappedLineCount(message, Math.max(layout.width - 4, 1)), 1);
+    const messageTop = 1;
+    const inputTop = messageTop + messageHeight + 1;
+    const errorTop = hasInput ? inputTop + 1 : messageTop + messageHeight + 1;
+    const buttonTop = layout.height - 3;
     backdropBox.setContent(buildBackdropContent(Number(screen.width), Number(screen.height)));
     modalBox.top = layout.top;
     modalBox.left = layout.left;
     modalBox.width = layout.width;
     modalBox.height = layout.height;
+    messageBox.top = messageTop;
+    messageBox.height = hasButtons ? Math.max(buttonTop - messageTop - (hasInput ? 4 : 1), 1) : Math.max(layout.height - 4, 1);
     messageBox.width = Math.max(layout.width - 4, 1);
-    inputBox.width = Math.max(layout.width - 4, 1);
-    errorBox.width = Math.max(layout.width - 4, 1);
-    buttonBox.width = Math.max(layout.width - 4, 1);
+    if (hasInput) {
+      inputBox.top = inputTop;
+      inputBox.width = Math.max(layout.width - 4, 1);
+      errorBox.top = errorTop;
+      errorBox.width = Math.max(layout.width - 4, 1);
+    }
+    if (hasButtons) {
+      if (!hasInput) {
+        errorBox.top = errorTop;
+        errorBox.width = Math.max(layout.width - 4, 1);
+      }
+      buttonBox.top = buttonTop;
+      buttonBox.width = Math.max(layout.width - 4, 1);
+    }
   };
 
   const updateContent = () => {
     const confirmEnabled = canConfirm();
-    messageBox.setContent(bold(message));
+    const buttonLabelWidth = Math.max(cancelLabel.length, confirmLabel.length);
+    messageBox.setContent(mode === "info" ? message : bold(message));
     if (hasInput) {
       inputBox.setContent(renderInputLine(inputLabel ?? "Value", inputValue));
     }
-    errorBox.setContent(
-      errorMessage
-        ? `{${toneTag("error")}}${truncate(errorMessage, Math.max(layout.width - 4, 1)).trimEnd()}{/${toneTag("error")}}`
-        : "",
-    );
-    buttonBox.setContent([
-      renderActionButton(cancelLabel, { selected: selectedButton === "cancel", tone: "danger" }),
-      renderActionButton(confirmLabel, { disabled: !confirmEnabled, selected: selectedButton === "confirm" }),
-    ].join("      "));
+    if (hasButtons) {
+      errorBox.setContent(
+        errorMessage
+          ? `{${toneTag("error")}}${truncate(errorMessage, Math.max(layout.width - 4, 1)).trimEnd()}{/${toneTag("error")}}`
+          : "",
+      );
+      buttonBox.setContent([
+        renderActionButton(cancelLabel, {
+          selected: selectedButton === "cancel",
+          tone: "danger",
+          width: buttonLabelWidth,
+        }),
+        renderActionButton(confirmLabel, {
+          disabled: !confirmEnabled,
+          selected: selectedButton === "confirm",
+          width: buttonLabelWidth,
+        }),
+      ].join("      "));
+    }
   };
 
   const destroy = ({
@@ -269,9 +372,18 @@ export function openActionModal(options: ActionModalOptions): ActionModalControl
       return false;
     }
 
-    if (key.name === "escape") {
+    if (key.name && modalCloseKeys.has(key.name)) {
       cancel();
       return true;
+    }
+
+    if (ch && modalCloseKeys.has(ch)) {
+      cancel();
+      return true;
+    }
+
+    if (!hasButtons) {
+      return false;
     }
 
     if (key.name === "left" || (key.name === "tab" && key.shift)) {

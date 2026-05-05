@@ -27,18 +27,13 @@ export interface EmbeddedTerminalEnvironmentOptions {
   cwd?: string;
 }
 
-export type EmbeddedTerminalCloseState = "confirm" | "idle";
-export type EmbeddedTerminalCloseEvent = "escape" | "input";
-
-export interface EmbeddedTerminalCloseTransition {
-  shouldClose: boolean;
-  state: EmbeddedTerminalCloseState;
-}
-
 export interface EmbeddedTerminalController {
   destroy(options?: { kill?: boolean; notify?: boolean; render?: boolean }): void;
-  requestClose(): void;
+  hide(options?: { notify?: boolean; render?: boolean }): void;
+  isAlive(): boolean;
+  isVisible(): boolean;
   resize(): void;
+  show(): void;
 }
 
 export interface EmbeddedTerminalContentOptions {
@@ -47,8 +42,9 @@ export interface EmbeddedTerminalContentOptions {
 
 interface EmbeddedTerminalOptions {
   cwd: string;
-  onClose(): void;
+  onDestroy?(): void;
   onEscapeInput?(): void;
+  onHide?(): void;
   screen: Widgets.Screen;
   serviceName: string;
 }
@@ -85,24 +81,12 @@ export function calculateEmbeddedTerminalLayout(screenWidth: number, screenHeigh
   };
 }
 
-export function getNextEmbeddedTerminalCloseTransition(
-  state: EmbeddedTerminalCloseState,
-  event: EmbeddedTerminalCloseEvent,
-  ptyAlive: boolean,
-): EmbeddedTerminalCloseTransition {
-  if (event === "input") {
-    return { shouldClose: false, state: "idle" };
-  }
-
-  if (!ptyAlive || state === "confirm") {
-    return { shouldClose: true, state };
-  }
-
-  return { shouldClose: false, state: "confirm" };
-}
-
 export function isStandaloneEscapeInput(input: Buffer | string): boolean {
   return Buffer.isBuffer(input) ? input.length === 1 && input[0] === 0x1b : input === "\x1b";
+}
+
+export function getEmbeddedTerminalHint(ptyAlive: boolean): string {
+  return ptyAlive ? "Esc hide - t resume" : "exited - Esc return";
 }
 
 export function resolveEmbeddedTerminalShell(
@@ -212,17 +196,10 @@ function truncateLabel(value: string, maxWidth: number): string {
 function buildTerminalLabel(
   serviceName: string,
   cwd: string,
-  closeState: EmbeddedTerminalCloseState,
   ptyAlive: boolean,
   width: number,
 ): string {
-  const hint = !ptyAlive
-    ? "exited - Esc close"
-    : closeState === "confirm"
-      ? "Esc again to kill"
-      : "Esc close";
-
-  return truncateLabel(` Terminal: ${serviceName} ${cwd} | ${hint} `, Math.max(width - 2, 1));
+  return truncateLabel(` Terminal: ${serviceName} ${cwd} | ${getEmbeddedTerminalHint(ptyAlive)} `, Math.max(width - 2, 1));
 }
 
 function escapeBlessedTagText(value: string): string {
@@ -246,9 +223,9 @@ function getCellStyleTag(cell: ReturnType<HeadlessTerminal["buffer"]["active"]["
     styleParts.push("bold");
   }
 
-  if (cell.isUnderline()) {
-    styleParts.push("underline");
-  }
+  // Blessed on iTerm2 can emit Setulc/underline-color errors when underline
+  // attributes are preserved from the PTY buffer. Keep the terminal content
+  // stable by dropping underline while retaining the rest of the styling.
 
   if (cell.isBlink()) {
     styleParts.push("blink");
@@ -338,12 +315,11 @@ export function buildEmbeddedTerminalContent(
 }
 
 export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): EmbeddedTerminalController {
-  const { cwd, onClose, onEscapeInput, screen, serviceName } = options;
+  const { cwd, onDestroy, onEscapeInput, onHide, screen, serviceName } = options;
   const program = screen.program as EmbeddedTerminalProgram;
   const terminalEnvironment = buildEmbeddedTerminalEnvironment({ baseEnv: process.env, cwd });
   const shell = resolveEmbeddedTerminalShell();
   let layout = calculateEmbeddedTerminalLayout(Number(screen.width), Number(screen.height));
-  let closeState: EmbeddedTerminalCloseState = "idle";
   let closed = false;
   let lastCloseRequestAt = 0;
   let lastRenderedContent = "";
@@ -358,10 +334,12 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
   let terminalBinarySubscription: XtermDisposable | null = null;
   let terminalDataSubscription: XtermDisposable | null = null;
   let terminalWriteSubscription: XtermDisposable | null = null;
+  let inputAttached = false;
   let pty: IPty | null = null;
   let ptyPath: string | null = null;
   let renderTimer: NodeJS.Timeout | null = null;
   const restoreMouseOnClose = Boolean(program.mouseEnabled);
+  let visible = true;
   const terminal = new XtermTerminal({
     allowProposedApi: true,
     cols: layout.cols,
@@ -384,7 +362,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     border: "line",
     focusable: true,
     height: layout.height,
-    label: buildTerminalLabel(serviceName, cwd, closeState, ptyAlive, layout.width),
+    label: buildTerminalLabel(serviceName, cwd, ptyAlive, layout.width),
     left: layout.left,
     mouse: false,
     scrollable: false,
@@ -398,7 +376,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
   });
 
   const requestTerminalRender = (immediate = false) => {
-    if (closed) {
+    if (closed || !visible) {
       return;
     }
 
@@ -417,7 +395,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
 
     renderTimer = setTimeout(() => {
       renderTimer = null;
-      if (!closed) {
+      if (!closed && visible) {
         screen.render();
       }
     }, TERMINAL_RENDER_DEBOUNCE_MS);
@@ -456,9 +434,73 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     requestTerminalRender(true);
   };
 
+  const attachInputListener = () => {
+    if (!inputListener || inputAttached) {
+      return;
+    }
+
+    screen.program.input.on("data", inputListener);
+    inputAttached = true;
+  };
+
+  const detachInputListener = () => {
+    if (!inputListener || !inputAttached) {
+      return;
+    }
+
+    screen.program.input.removeListener("data", inputListener);
+    inputAttached = false;
+  };
+
+  const hide = ({
+    notify = true,
+    render = true,
+  }: {
+    notify?: boolean;
+    render?: boolean;
+  } = {}) => {
+    if (closed || !visible) {
+      return;
+    }
+
+    visible = false;
+    detachInputListener();
+    backdropBox.hide();
+    terminalBox.hide();
+    screen.clearRegion(layout.left, layout.left + layout.width, layout.top, layout.top + layout.height);
+    if (restoreMouseOnClose) {
+      program.enableMouse();
+    }
+
+    if (notify) {
+      onHide?.();
+    }
+
+    if (render) {
+      screen.render();
+    }
+  };
+
+  const show = () => {
+    if (closed || visible) {
+      return;
+    }
+
+    visible = true;
+    if (restoreMouseOnClose) {
+      program.disableMouse();
+    }
+    backdropBox.show();
+    terminalBox.show();
+    attachInputListener();
+    updateLayout();
+    terminalBox.focus();
+    requestTerminalRender(true);
+  };
+
   const destroy = ({
     kill = true,
-    notify = true,
+    notify = false,
     render = true,
   }: {
     kill?: boolean;
@@ -483,10 +525,8 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     terminalBinarySubscription?.dispose();
     terminalDataSubscription?.dispose();
     terminalWriteSubscription?.dispose();
-    if (inputListener) {
-      screen.program.input.removeListener("data", inputListener);
-      inputListener = null;
-    }
+    detachInputListener();
+    inputListener = null;
     outputSubscription = null;
     exitSubscription = null;
     terminalBinarySubscription = null;
@@ -504,13 +544,16 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     terminal.dispose();
     terminalBox.destroy();
     backdropBox.destroy();
-    screen.clearRegion(layout.left, layout.left + layout.width, layout.top, layout.top + layout.height);
-    if (restoreMouseOnClose) {
+    if (visible) {
+      screen.clearRegion(layout.left, layout.left + layout.width, layout.top, layout.top + layout.height);
+    }
+    if (visible && restoreMouseOnClose) {
       program.enableMouse();
     }
+    visible = false;
 
     if (notify) {
-      onClose();
+      onDestroy?.();
     }
 
     if (render) {
@@ -524,23 +567,16 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
       return;
     }
     lastCloseRequestAt = now;
-
-    const transition = getNextEmbeddedTerminalCloseTransition(closeState, "escape", ptyAlive);
-    closeState = transition.state;
-
-    if (transition.shouldClose) {
-      destroy();
-      return;
-    }
-
-    updateLabel();
-    requestTerminalRender(true);
+    hide({ render: false });
   };
 
   const controller: EmbeddedTerminalController = {
     destroy,
-    requestClose,
+    hide,
+    isAlive: () => ptyAlive,
+    isVisible: () => visible,
     resize: updateLayout,
+    show,
   };
 
   const flushPendingStartupInput = () => {
@@ -582,7 +618,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
   };
 
   function updateLabel() {
-    const label = buildTerminalLabel(serviceName, cwd, closeState, ptyAlive, layout.width);
+    const label = buildTerminalLabel(serviceName, cwd, ptyAlive, layout.width);
     if (label === lastRenderedLabel) {
       return false;
     }
@@ -655,16 +691,8 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
 
     if (isStandaloneEscapeInput(input)) {
       onEscapeInput?.();
-      controller.requestClose();
+      requestClose();
       return;
-    }
-
-    const previousCloseState = closeState;
-    const transition = getNextEmbeddedTerminalCloseTransition(closeState, "input", ptyAlive);
-    closeState = transition.state;
-    if (closeState !== previousCloseState) {
-      updateLabel();
-      requestTerminalRender();
     }
 
     if (!ptyAlive) {
@@ -679,7 +707,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
 
     terminal.input(inputText);
   };
-  screen.program.input.on("data", inputListener);
+  attachInputListener();
 
   outputSubscription = pty.onData((data) => {
     if (closed) {
@@ -696,7 +724,6 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     }
 
     ptyAlive = false;
-    closeState = "idle";
     startupInputReady = true;
     pendingStartupInput = [];
     terminal.write(`\r\n[terminal exited with code ${event.exitCode}]\r\n`);

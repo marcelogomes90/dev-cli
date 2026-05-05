@@ -210,26 +210,30 @@ Behavior:
 
 The built-in UI lets you manage services individually after the supervisor is running.
 
-The header shows the project name, running service count, and live CPU/RAM usage. The service list shows the current git branch for service directories that are git repositories, plus per-service memory and CPU usage when the terminal is wide enough.
+The header shows the project name, running service count, and live CPU/RAM usage. The service list shows the current git branch for service directories that are git repositories, plus per-service memory and CPU usage when the terminal is wide enough. On wider terminals, the table also shows a `TERM` column when a service has an active embedded terminal session.
 
 ### Navigation
 
-- `↑/↓` or `j/k`: move between services
+- `↑/↓`: move between services
 - `PageUp` / `PageDown`: scroll logs
 - `Home` / `End`: jump to top or bottom of the visible log pane
 - `q` or `Esc`: exit the UI
 
 ### Actions
 
-- `a` or `Enter`: start the selected stopped service
+- `s` or `Enter`: start the selected stopped service
 - `i`: open a confirmation modal for `installCommand` on the selected stopped, failed, or running service
-- `s`: stop the selected running service
+- `k`: kill the selected running service
 - `r`: restart the selected running service, or recover a failed service by starting it again
 - `c`: clear logs for the selected service when logs exist
 - `v`: open the full service log in the native terminal viewer
 - `e`: open the selected service directory in the configured editor
 - `t`: open an embedded terminal for the selected service directory
-- `Esc` inside the embedded terminal: ask for confirmation; press `Esc` again to close it and return to the UI
+- `x`: kill the embedded terminal for the selected service
+- `?`: open a shortcut help modal with the full list of available keys
+- `Esc` inside the embedded terminal: hide it and return to the UI; press `t` again to resume the same session for that service
+
+If you try to exit the UI while one or more embedded terminal sessions are still running, the UI asks for confirmation before killing them.
 
 ### Git actions
 
