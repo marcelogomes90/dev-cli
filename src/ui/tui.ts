@@ -45,17 +45,26 @@ import { muted, toneTag, truncate, UI_THEME, type MessageTone } from "./theme";
 export { detectTerminalThemeVariant, isLightTerminalBackground, resolveUiTheme, UI_THEME, type TerminalThemeVariant, type UiTheme } from "./theme";
 
 export {
+  buildEmbeddedTerminalWheelInput,
   buildEmbeddedTerminalEnvironment,
   buildEmbeddedTerminalContent,
   calculateEmbeddedTerminalLayout,
   ensureNodePtySpawnHelperExecutable,
+  getEmbeddedTerminalMouseEncoding,
   getEmbeddedTerminalHint,
   getNodePtySpawnHelperPath,
+  getEmbeddedTerminalWheelMode,
+  isEmbeddedTerminalMouseInput,
   isStandaloneEscapeInput,
   resolveEmbeddedTerminalShell,
+  scrollEmbeddedTerminalViewport,
+  translateEmbeddedTerminalMousePosition,
   type EmbeddedTerminalContentOptions,
   type EmbeddedTerminalLayout,
+  type EmbeddedTerminalMouseEncoding,
   type EmbeddedTerminalShell,
+  type EmbeddedTerminalWheelDirection,
+  type EmbeddedTerminalWheelMode,
 } from "./embedded-terminal";
 export { buildHeaderContent, getSupervisorPaneLayout, type SupervisorPaneLayout } from "./layout";
 export { buildLogViewerCommand, launchExternalLogViewer, type LogViewerCommand } from "./logs";
@@ -453,6 +462,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
 
       return embeddedTerminalSessions.get(visibleEmbeddedTerminalService) ?? null;
     };
+
+    const isEmbeddedTerminalVisible = (): boolean => getVisibleEmbeddedTerminal()?.isVisible() ?? false;
 
     const getLiveEmbeddedTerminalCount = (): number => countLiveEmbeddedTerminalSessions(embeddedTerminalSessions);
     const getActiveEmbeddedTerminalServices = (): Set<string> => getActiveEmbeddedTerminalSessionServices(embeddedTerminalSessions);
@@ -1653,6 +1664,10 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       }
     });
     screen.key(["?"], () => {
+      if (isEmbeddedTerminalVisible()) {
+        return;
+      }
+
       if (mode === "navigate") {
         openShortcutHelpModal();
       }

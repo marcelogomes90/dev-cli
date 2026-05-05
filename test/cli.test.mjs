@@ -962,15 +962,21 @@ test("buildShortcutLine shows restart and clear logs only when available", async
 
 test("embedded terminal helpers resolve shell, layout, and hide/resume hints", async () => {
   const {
+    buildEmbeddedTerminalWheelInput,
     calculateActionModalLayout,
     buildEmbeddedTerminalEnvironment,
     buildEmbeddedTerminalContent,
     calculateEmbeddedTerminalLayout,
     ensureNodePtySpawnHelperExecutable,
     getEmbeddedTerminalHint,
+    getEmbeddedTerminalMouseEncoding,
     getNodePtySpawnHelperPath,
+    getEmbeddedTerminalWheelMode,
+    isEmbeddedTerminalMouseInput,
     isStandaloneEscapeInput,
     resolveEmbeddedTerminalShell,
+    scrollEmbeddedTerminalViewport,
+    translateEmbeddedTerminalMousePosition,
   } = await import(path.join(projectRoot, "dist/lib.js"));
 
   assert.deepEqual(calculateEmbeddedTerminalLayout(100, 40), {
@@ -1072,8 +1078,34 @@ test("embedded terminal helpers resolve shell, layout, and hide/resume hints", a
   assert.equal(isStandaloneEscapeInput(Buffer.from([0x1b])), true);
   assert.equal(isStandaloneEscapeInput(Buffer.from("\x1b[A")), false);
   assert.equal(isStandaloneEscapeInput("x"), false);
+  assert.equal(isEmbeddedTerminalMouseInput("\x1b[<64;12;8M"), true);
+  assert.equal(isEmbeddedTerminalMouseInput(Buffer.from("\x1b[Mabc")), true);
+  assert.equal(isEmbeddedTerminalMouseInput(Buffer.from("\x1b[A")), false);
   assert.equal(getEmbeddedTerminalHint(true), "Esc hide");
   assert.equal(getEmbeddedTerminalHint(false), "exited - Esc return");
+  assert.deepEqual(
+    translateEmbeddedTerminalMousePosition(0, 0, {
+      cols: 98,
+      left: 0,
+      rows: 38,
+      top: 0,
+    }),
+    { col: 1, row: 1 },
+  );
+  assert.deepEqual(
+    translateEmbeddedTerminalMousePosition(120, 50, {
+      cols: 98,
+      left: 0,
+      rows: 38,
+      top: 0,
+    }),
+    { col: 98, row: 38 },
+  );
+  assert.equal(buildEmbeddedTerminalWheelInput("up", { col: 4, row: 6 }, "sgr"), "\x1b[<64;4;6M");
+  assert.equal(
+    buildEmbeddedTerminalWheelInput("down", { col: 4, row: 6 }, "default"),
+    `\x1b[M${String.fromCharCode(97)}${String.fromCharCode(36)}${String.fromCharCode(38)}`,
+  );
 
   const xtermHeadless = await import("@xterm/headless");
   const { Terminal } = xtermHeadless.default;
@@ -1113,6 +1145,39 @@ test("embedded terminal helpers resolve shell, layout, and hide/resume hints", a
     buildEmbeddedTerminalContent(underlinedTerminal, { showCursor: false }),
     /underline/,
   );
+
+  const defaultMouseTerminal = new Terminal({
+    allowProposedApi: true,
+    cols: 80,
+    rows: 24,
+  });
+  await new Promise((resolve) => defaultMouseTerminal.write("\u001b[?1000h", resolve));
+  assert.equal(getEmbeddedTerminalMouseEncoding(defaultMouseTerminal), "default");
+  assert.equal(getEmbeddedTerminalWheelMode(defaultMouseTerminal), "pass-through");
+
+  const sgrMouseTerminal = new Terminal({
+    allowProposedApi: true,
+    cols: 80,
+    rows: 24,
+  });
+  await new Promise((resolve) => sgrMouseTerminal.write("\u001b[?1000h\u001b[?1006h", resolve));
+  assert.equal(getEmbeddedTerminalMouseEncoding(sgrMouseTerminal), "sgr");
+  assert.equal(getEmbeddedTerminalWheelMode(sgrMouseTerminal), "pass-through");
+
+  const scrollbackTerminal = new Terminal({
+    allowProposedApi: true,
+    cols: 8,
+    rows: 2,
+    scrollback: 100,
+  });
+  await new Promise((resolve) => scrollbackTerminal.write("1\r\n2\r\n3\r\n4\r\n", resolve));
+  assert.equal(getEmbeddedTerminalMouseEncoding(scrollbackTerminal), null);
+  assert.equal(getEmbeddedTerminalWheelMode(scrollbackTerminal), "scrollback");
+  assert.equal(scrollbackTerminal.buffer.active.viewportY, 3);
+  assert.equal(scrollEmbeddedTerminalViewport(scrollbackTerminal, "up", 2), true);
+  assert.equal(scrollbackTerminal.buffer.active.viewportY, 1);
+  assert.equal(scrollEmbeddedTerminalViewport(scrollbackTerminal, "down", 2), true);
+  assert.equal(scrollbackTerminal.buffer.active.viewportY, 3);
 });
 
 test("buildLogViewerCommand uses the native terminal viewer script", async () => {

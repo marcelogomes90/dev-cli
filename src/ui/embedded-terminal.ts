@@ -40,6 +40,10 @@ export interface EmbeddedTerminalContentOptions {
   showCursor?: boolean;
 }
 
+export type EmbeddedTerminalMouseEncoding = "default" | "sgr";
+export type EmbeddedTerminalWheelMode = "pass-through" | "scrollback";
+export type EmbeddedTerminalWheelDirection = "up" | "down";
+
 interface EmbeddedTerminalOptions {
   cwd: string;
   onDestroy?(): void;
@@ -64,6 +68,25 @@ interface EmbeddedTerminalProgram {
   mouseEnabled?: boolean;
 }
 
+interface EmbeddedTerminalMouseEvent extends blessed.Widgets.Events.IMouseEventArg {
+  raw?: [number, number, number];
+}
+
+interface EmbeddedTerminalMousePosition {
+  col: number;
+  row: number;
+}
+
+interface HeadlessTerminalWithMouseEncoding extends HeadlessTerminal {
+  _core?: {
+    coreMouseService?: {
+      activeEncoding?: string;
+    };
+  };
+}
+
+const DEFAULT_EMBEDDED_TERMINAL_WHEEL_SCROLL_LINES = 3;
+
 export function calculateEmbeddedTerminalLayout(screenWidth: number, screenHeight: number): EmbeddedTerminalLayout {
   const boundedScreenWidth = Math.max(Math.floor(screenWidth), 1);
   const boundedScreenHeight = Math.max(Math.floor(screenHeight), 1);
@@ -84,8 +107,71 @@ export function isStandaloneEscapeInput(input: Buffer | string): boolean {
   return Buffer.isBuffer(input) ? input.length === 1 && input[0] === 0x1b : input === "\x1b";
 }
 
+export function isEmbeddedTerminalMouseInput(input: Buffer | string): boolean {
+  const normalizedInput = Buffer.isBuffer(input)
+    ? input[0] > 127 && input[1] === undefined
+      ? `\x1b${String.fromCharCode(input[0] - 128)}`
+      : input.toString("utf8")
+    : input;
+
+  return (Buffer.isBuffer(input) && input[0] === 0x1b && input[1] === 0x5b && input[2] === 0x4d)
+    || /^\x1b\[M([\x00\u0020-\uffff]{3})/.test(normalizedInput)
+    || /^\x1b\[(\d+;\d+;\d+)M/.test(normalizedInput)
+    || /^\x1b\[<(\d+;\d+;\d+)([mM])/.test(normalizedInput);
+}
+
 export function getEmbeddedTerminalHint(ptyAlive: boolean): string {
   return ptyAlive ? "Esc hide" : "exited - Esc return";
+}
+
+export function getEmbeddedTerminalMouseEncoding(
+  terminal: HeadlessTerminal,
+): EmbeddedTerminalMouseEncoding | null {
+  if (terminal.modes.mouseTrackingMode === "none") {
+    return null;
+  }
+
+  const activeEncoding = (terminal as HeadlessTerminalWithMouseEncoding)._core?.coreMouseService?.activeEncoding;
+  return activeEncoding === "SGR" ? "sgr" : "default";
+}
+
+export function getEmbeddedTerminalWheelMode(terminal: HeadlessTerminal): EmbeddedTerminalWheelMode {
+  return getEmbeddedTerminalMouseEncoding(terminal) ? "pass-through" : "scrollback";
+}
+
+export function translateEmbeddedTerminalMousePosition(
+  eventX: number,
+  eventY: number,
+  layout: Pick<EmbeddedTerminalLayout, "cols" | "left" | "rows" | "top">,
+): EmbeddedTerminalMousePosition {
+  return {
+    col: Math.min(Math.max(eventX - layout.left, 1), layout.cols),
+    row: Math.min(Math.max(eventY - layout.top, 1), layout.rows),
+  };
+}
+
+export function buildEmbeddedTerminalWheelInput(
+  direction: EmbeddedTerminalWheelDirection,
+  position: EmbeddedTerminalMousePosition,
+  encoding: EmbeddedTerminalMouseEncoding,
+): string {
+  const buttonCode = direction === "up" ? 64 : 65;
+
+  if (encoding === "sgr") {
+    return `\x1b[<${buttonCode};${position.col};${position.row}M`;
+  }
+
+  return `\x1b[M${String.fromCharCode(buttonCode + 32)}${String.fromCharCode(position.col + 32)}${String.fromCharCode(position.row + 32)}`;
+}
+
+export function scrollEmbeddedTerminalViewport(
+  terminal: HeadlessTerminal,
+  direction: EmbeddedTerminalWheelDirection,
+  lineCount = DEFAULT_EMBEDDED_TERMINAL_WHEEL_SCROLL_LINES,
+): boolean {
+  const initialViewportY = terminal.buffer.active.viewportY;
+  terminal.scrollLines(direction === "up" ? -lineCount : lineCount);
+  return terminal.buffer.active.viewportY !== initialViewportY;
 }
 
 export function resolveEmbeddedTerminalShell(
@@ -331,6 +417,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
   let ptyPath: string | null = null;
   let renderTimer: NodeJS.Timeout | null = null;
   const restoreMouseOnClose = Boolean(program.mouseEnabled);
+  let enabledMouseForTerminal = false;
   let visible = true;
   const terminal = new XtermTerminal({
     allowProposedApi: true,
@@ -347,7 +434,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     height: layout.height,
     label: buildTerminalLabel(serviceName, cwd, ptyAlive, layout.width),
     left: layout.left,
-    mouse: false,
+    mouse: true,
     scrollable: false,
     style: {
       border: { fg: UI_THEME.accent },
@@ -434,6 +521,20 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     inputAttached = false;
   };
 
+  const ensureMouseEnabled = () => {
+    if (!program.mouseEnabled) {
+      program.enableMouse();
+      enabledMouseForTerminal = true;
+    }
+  };
+
+  const restoreMouseState = () => {
+    if (enabledMouseForTerminal && !restoreMouseOnClose) {
+      program.disableMouse();
+      enabledMouseForTerminal = false;
+    }
+  };
+
   const hide = ({
     notify = true,
     render = true,
@@ -448,9 +549,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     visible = false;
     detachInputListener();
     terminalBox.hide();
-    if (restoreMouseOnClose) {
-      program.enableMouse();
-    }
+    restoreMouseState();
 
     if (notify) {
       onHide?.();
@@ -467,9 +566,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     }
 
     visible = true;
-    if (restoreMouseOnClose) {
-      program.disableMouse();
-    }
+    ensureMouseEnabled();
     terminalBox.show();
     attachInputListener();
     updateLayout();
@@ -522,9 +619,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
 
     terminal.dispose();
     terminalBox.destroy();
-    if (visible && restoreMouseOnClose) {
-      program.enableMouse();
-    }
+    restoreMouseState();
     visible = false;
 
     if (notify) {
@@ -604,9 +699,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
   }
 
   screen.append(terminalBox);
-  if (restoreMouseOnClose) {
-    program.disableMouse();
-  }
+  ensureMouseEnabled();
 
   try {
     ensureNodePtySpawnHelperExecutable();
@@ -620,9 +713,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     ptyPath = (pty as IPty & { _pty?: string })._pty ?? null;
     ensureEmbeddedTerminalNoEcho(ptyPath);
   } catch (error) {
-    if (restoreMouseOnClose) {
-      program.enableMouse();
-    }
+    restoreMouseState();
     terminal.dispose();
     terminalBox.destroy();
     throw error;
@@ -656,8 +747,36 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     pty?.write(data);
   });
 
+  const handleWheel = (direction: EmbeddedTerminalWheelDirection, event: EmbeddedTerminalMouseEvent) => {
+    if (closed || !visible) {
+      return;
+    }
+
+    const encoding = getEmbeddedTerminalMouseEncoding(terminal);
+    if (encoding && ptyAlive) {
+      const position = translateEmbeddedTerminalMousePosition(event.x, event.y, layout);
+      pty?.write(buildEmbeddedTerminalWheelInput(direction, position, encoding));
+      return;
+    }
+
+    if (scrollEmbeddedTerminalViewport(terminal, direction) && updateTerminalContent()) {
+      requestTerminalRender();
+    }
+  };
+
+  terminalBox.on("wheelup", (event) => {
+    handleWheel("up", event as EmbeddedTerminalMouseEvent);
+  });
+  terminalBox.on("wheeldown", (event) => {
+    handleWheel("down", event as EmbeddedTerminalMouseEvent);
+  });
+
   inputListener = (input: Buffer | string) => {
     if (closed) {
+      return;
+    }
+
+    if (isEmbeddedTerminalMouseInput(input)) {
       return;
     }
 
