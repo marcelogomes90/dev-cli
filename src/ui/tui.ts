@@ -90,6 +90,61 @@ export interface TuiProgramOptions {
   terminal?: string;
 }
 
+interface StableMouseProgram {
+  enableMouse(): void;
+  mouseEnabled?: boolean;
+  setMouse?(options: Record<string, boolean>, enable?: boolean): void;
+  _devCliStableMouseMode?: boolean;
+}
+
+const BLESSED_PLAB_NORM_ERROR_PATTERN = /^Error on .+\.plab_norm:$/;
+
+export function applyStableTuiMouseMode(program: StableMouseProgram): void {
+  program.setMouse?.({ sgrMouse: true }, true);
+}
+
+export function configureStableTuiMouseMode(program: StableMouseProgram): void {
+  if (program._devCliStableMouseMode) {
+    return;
+  }
+
+  const enableMouse = program.enableMouse.bind(program);
+  program.enableMouse = () => {
+    enableMouse();
+    applyStableTuiMouseMode(program);
+  };
+  program._devCliStableMouseMode = true;
+
+  if (program.mouseEnabled) {
+    applyStableTuiMouseMode(program);
+  }
+}
+
+export function createTuiProgram(options = buildTuiProgramOptions()) {
+  const originalConsoleError = console.error;
+  const consoleErrorCalls: unknown[][] = [];
+  let hasBlessedPlabNormError = false;
+
+  try {
+    console.error = (...args: unknown[]) => {
+      const firstArg = typeof args[0] === "string" ? args[0] : "";
+      const rendered = args.length > 1 ? firstArg.replaceAll("%s", String(args[1])) : firstArg;
+      if (BLESSED_PLAB_NORM_ERROR_PATTERN.test(rendered)) {
+        hasBlessedPlabNormError = true;
+      }
+      consoleErrorCalls.push(args);
+    };
+    return blessed.program(options);
+  } finally {
+    console.error = originalConsoleError;
+    if (!hasBlessedPlabNormError) {
+      for (const args of consoleErrorCalls) {
+        originalConsoleError(...args);
+      }
+    }
+  }
+}
+
 export function buildTuiProgramOptions(
   {
     input = process.stdin,
@@ -249,7 +304,8 @@ function buildServiceRenderKey(
 export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
   await new Promise<void>((resolve) => {
     const initialPaneLayout = getSupervisorPaneLayout(process.stdout.columns ?? 120, process.stdout.rows ?? 32);
-    const program = blessed.program(buildTuiProgramOptions());
+    const program = createTuiProgram();
+    configureStableTuiMouseMode(program);
     const screen = blessed.screen({
       fullUnicode: true,
       program,

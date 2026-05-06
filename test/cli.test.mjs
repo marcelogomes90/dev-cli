@@ -667,6 +667,8 @@ test("buildShortcutLine shows restart and clear logs only when available", async
     buildShortcutItems,
     buildShortcutLine,
     countLiveEmbeddedTerminalSessions,
+    configureStableTuiMouseMode,
+    createTuiProgram,
     detectTerminalThemeVariant,
     formatActionModalInputValue,
     getActiveEmbeddedTerminalSessionServices,
@@ -764,6 +766,46 @@ test("buildShortcutLine shows restart and clear logs only when available", async
     tput: true,
     zero: true,
   });
+  const mouseCalls = [];
+  const mouseProgram = {
+    enableMouse() {
+      mouseCalls.push(["enableMouse"]);
+      this.mouseEnabled = true;
+    },
+    mouseEnabled: false,
+    setMouse(options, enable) {
+      mouseCalls.push(["setMouse", options, enable]);
+    },
+  };
+  configureStableTuiMouseMode(mouseProgram);
+  mouseProgram.enableMouse();
+  mouseProgram.enableMouse();
+  assert.deepEqual(mouseCalls, [
+    ["enableMouse"],
+    ["setMouse", {
+      sgrMouse: true,
+    }, true],
+    ["enableMouse"],
+    ["setMouse", {
+      sgrMouse: true,
+    }, true],
+  ]);
+  const originalConsoleError = console.error;
+  const consoleErrors = [];
+  console.error = (...args) => {
+    consoleErrors.push(args);
+  };
+  try {
+    const program = createTuiProgram({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: "xterm-256color",
+    });
+    program.destroy();
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.deepEqual(consoleErrors, []);
   const compactFooterShortcutLine = buildFooterShortcutLine(buildShortcutItems(runningSelected, true, true), 52);
   assert.match(compactFooterShortcutLine, /\[↑\/↓\] Move/);
   assert.match(compactFooterShortcutLine, /\[k\] Kill/);

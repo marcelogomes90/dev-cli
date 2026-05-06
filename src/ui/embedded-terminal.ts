@@ -68,6 +68,11 @@ interface EmbeddedTerminalProgram {
   mouseEnabled?: boolean;
 }
 
+interface EmbeddedTerminalRepaintScreen {
+  alloc?(dirty?: boolean): void;
+  realloc?(): void;
+}
+
 interface EmbeddedTerminalMouseEvent extends blessed.Widgets.Events.IMouseEventArg {
   raw?: [number, number, number];
 }
@@ -172,6 +177,16 @@ export function scrollEmbeddedTerminalViewport(
   const initialViewportY = terminal.buffer.active.viewportY;
   terminal.scrollLines(direction === "up" ? -lineCount : lineCount);
   return terminal.buffer.active.viewportY !== initialViewportY;
+}
+
+function forceEmbeddedTerminalViewportRepaint(screen: Widgets.Screen): void {
+  const repaintScreen = screen as EmbeddedTerminalRepaintScreen;
+  if (repaintScreen.realloc) {
+    repaintScreen.realloc();
+    return;
+  }
+
+  repaintScreen.alloc?.(true);
 }
 
 export function resolveEmbeddedTerminalShell(
@@ -759,8 +774,10 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
       return;
     }
 
-    if (scrollEmbeddedTerminalViewport(terminal, direction) && updateTerminalContent()) {
-      requestTerminalRender();
+    if (scrollEmbeddedTerminalViewport(terminal, direction)) {
+      forceEmbeddedTerminalViewportRepaint(screen);
+      updateTerminalContent();
+      requestTerminalRender(true);
     }
   };
 
