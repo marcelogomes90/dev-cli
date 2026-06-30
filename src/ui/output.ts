@@ -4,6 +4,7 @@ import Table from "cli-table3";
 import type { ProjectConfig } from "../core/config";
 import type { ManagedServiceState, SupervisorResponse, SupervisorState } from "../core/supervisor";
 import { formatBytes } from "./bytes";
+import { formatRelativeAge } from "./format";
 
 export const STATUS_TABLE_HEAD = ["SERVICE", "GROUP", "STATUS", "BRANCH"];
 export const STATUS_LIVE_TABLE_HEAD = ["SERVICE", "GROUP", "STATUS", "BRANCH", "PID", "UPTIME", "MEM", "CPU", "LOG"];
@@ -71,34 +72,6 @@ function colorStatus(status: ManagedServiceState["status"] | "stopped"): string 
     default:
       return pc.gray(status);
   }
-}
-
-function formatRelativeAge(value: string | null, now = Date.now()): string {
-  if (!value) {
-    return "--";
-  }
-
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) {
-    return "--";
-  }
-
-  const seconds = Math.max(Math.floor((now - parsed) / 1000), 0);
-  if (seconds < 60) {
-    return `${seconds}s`;
-  }
-
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) {
-    return `${minutes}m`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) {
-    return `${hours}h`;
-  }
-
-  return `${Math.floor(hours / 24)}d`;
 }
 
 function formatServiceUptime(service: ManagedServiceState, now: number): string {

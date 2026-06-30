@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { execa } from "execa";
 
 const projectRoot = process.cwd();
@@ -366,6 +367,32 @@ async function runGit(cwd, args, reject = true) {
       ...process.env,
       GIT_TERMINAL_PROMPT: "0",
     },
+  });
+}
+
+function sendRawSupervisorLine(socketPath, payload) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    let raw = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk) => {
+      raw += chunk;
+      const newlineIndex = raw.indexOf("\n");
+      if (newlineIndex === -1) {
+        return;
+      }
+
+      socket.end();
+      try {
+        resolve(JSON.parse(raw.slice(0, newlineIndex)));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    socket.on("connect", () => {
+      socket.write(payload);
+    });
   });
 }
 
@@ -2103,4 +2130,202 @@ test("supervisor pull-branch fails for a non-git service", async () => {
     await daemon.shutdown().catch(() => {});
     await clearSupervisorFiles(projectName);
   }
+});
+
+test("formatRelativeAge renders compact ages and handles invalid input", async () => {
+  const { formatRelativeAge } = await import(path.join(projectRoot, "dist/lib.js"));
+  const now = Date.parse("2026-01-01T00:00:00.000Z");
+
+  assert.equal(formatRelativeAge(null, now), "--");
+  assert.equal(formatRelativeAge("not-a-date", now), "--");
+  assert.equal(formatRelativeAge("2026-01-01T00:00:00.000Z", now), "0s");
+  assert.equal(formatRelativeAge("2025-12-31T23:59:30.000Z", now), "30s");
+  assert.equal(formatRelativeAge("2025-12-31T23:55:00.000Z", now), "5m");
+  assert.equal(formatRelativeAge("2025-12-31T21:00:00.000Z", now), "3h");
+  assert.equal(formatRelativeAge("2025-12-28T00:00:00.000Z", now), "4d");
+  // Future timestamps clamp to zero rather than going negative.
+  assert.equal(formatRelativeAge("2026-01-01T00:01:00.000Z", now), "0s");
+});
+
+test("saveSupervisorState writes state atomically without leaving temp files", async () => {
+  const projectName = `dev-cli-atomic-state-${Date.now()}`;
+  const fixtureDir = await createSupervisorFixture(projectName);
+  const {
+    clearSupervisorFiles,
+    getSupervisorPaths,
+    loadProjectConfig,
+    readSupervisorState,
+    SupervisorDaemon,
+  } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  const config = await loadProjectConfig(projectName, fixtureDir);
+  const daemon = await SupervisorDaemon.create(projectName, fixtureDir);
+
+  try {
+    await daemon.start();
+
+    await waitFor(async () => {
+      const state = await readSupervisorState(projectName);
+      assert.ok(state);
+      await stat(state.socketPath);
+    });
+
+    const paths = getSupervisorPaths(projectName);
+    const raw = await readFile(paths.statePath, "utf8");
+    // A complete, parseable document proves the rename published a fully written file.
+    const parsed = JSON.parse(raw);
+    assert.equal(parsed.project, projectName);
+
+    const entries = await readdir(paths.baseDir);
+    assert.ok(
+      entries.every((entry) => !entry.endsWith(".tmp")),
+      `expected no leftover temp files, found: ${entries.join(", ")}`,
+    );
+  } finally {
+    await daemon.shutdown().catch(() => {});
+    await clearSupervisorFiles(projectName);
+  }
+});
+
+test("supervisor stays alive after a malformed request", async () => {
+  const projectName = `dev-cli-bad-request-${Date.now()}`;
+  const fixtureDir = await createSupervisorFixture(projectName);
+  const {
+    clearSupervisorFiles,
+    loadProjectConfig,
+    readSupervisorState,
+    sendSupervisorRequest,
+    SupervisorDaemon,
+  } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  const config = await loadProjectConfig(projectName, fixtureDir);
+  const daemon = await SupervisorDaemon.create(projectName, fixtureDir);
+
+  let socketPath;
+  try {
+    await daemon.start();
+
+    await waitFor(async () => {
+      const state = await readSupervisorState(projectName);
+      assert.ok(state);
+      await stat(state.socketPath);
+      socketPath = state.socketPath;
+    });
+
+    const badResponse = await sendRawSupervisorLine(socketPath, "this is not json\n");
+    assert.equal(badResponse.ok, false);
+    assert.match(badResponse.message, /Invalid request/);
+
+    // The daemon must keep serving requests instead of crashing on bad input.
+    const ping = await sendSupervisorRequest(projectName, { id: `ping-${Date.now()}`, type: "ping" });
+    assert.equal(ping.ok, true);
+  } finally {
+    await daemon.shutdown().catch(() => {});
+    await clearSupervisorFiles(config.project);
+  }
+});
+
+test("canPerformServiceAction is the single source of truth for action availability", async () => {
+  const { canPerformServiceAction } = await import(path.join(projectRoot, "dist/lib.js"));
+  const service = (overrides) => ({
+    branch: "main",
+    command: "node server.js",
+    cpuPercent: null,
+    cwd: "/tmp",
+    exitCode: null,
+    group: "api",
+    installCommand: null,
+    isGit: false,
+    lastStartedAt: null,
+    lastStoppedAt: null,
+    logPath: "/tmp/api.log",
+    memoryBytes: null,
+    pid: null,
+    service: "api",
+    status: "stopped",
+    ...overrides,
+  });
+
+  assert.equal(canPerformServiceAction("start", null), false);
+
+  // start: only from stopped/failed
+  assert.equal(canPerformServiceAction("start", service({ status: "stopped" })), true);
+  assert.equal(canPerformServiceAction("start", service({ status: "failed" })), true);
+  assert.equal(canPerformServiceAction("start", service({ status: "running" })), false);
+  assert.equal(canPerformServiceAction("start", service({ status: "starting" })), false);
+
+  // stop: running/starting/failed
+  assert.equal(canPerformServiceAction("stop", service({ status: "running" })), true);
+  assert.equal(canPerformServiceAction("stop", service({ status: "starting" })), true);
+  assert.equal(canPerformServiceAction("stop", service({ status: "failed" })), true);
+  assert.equal(canPerformServiceAction("stop", service({ status: "stopped" })), false);
+  assert.equal(canPerformServiceAction("stop", service({ status: "stopping" })), false);
+
+  // restart: running, plus failed (recoverable via restart)
+  assert.equal(canPerformServiceAction("restart", service({ status: "running" })), true);
+  assert.equal(canPerformServiceAction("restart", service({ status: "failed" })), true);
+  assert.equal(canPerformServiceAction("restart", service({ status: "stopped" })), false);
+  assert.equal(canPerformServiceAction("restart", service({ status: "starting" })), false);
+
+  // install: needs installCommand and a stable status
+  assert.equal(canPerformServiceAction("install", service({ status: "running", installCommand: "yarn" })), true);
+  assert.equal(canPerformServiceAction("install", service({ status: "stopped", installCommand: "yarn" })), true);
+  assert.equal(canPerformServiceAction("install", service({ status: "running", installCommand: null })), false);
+  assert.equal(canPerformServiceAction("install", service({ status: "starting", installCommand: "yarn" })), false);
+
+  // clear-logs: depends only on hasLogs
+  assert.equal(canPerformServiceAction("clear-logs", service({ status: "running" }), { hasLogs: true }), true);
+  assert.equal(canPerformServiceAction("clear-logs", service({ status: "running" }), { hasLogs: false }), false);
+
+  // pull/checkout: needs isGit and a stable status
+  for (const action of ["pull", "checkout"]) {
+    assert.equal(canPerformServiceAction(action, service({ status: "stopped", isGit: true })), true);
+    assert.equal(canPerformServiceAction(action, service({ status: "running", isGit: true })), true);
+    assert.equal(canPerformServiceAction(action, service({ status: "stopped", isGit: false })), false);
+    assert.equal(canPerformServiceAction(action, service({ status: "starting", isGit: true })), false);
+  }
+});
+
+test("optimisticStatusForAction and describeServiceActionBlock match the action flows", async () => {
+  const { optimisticStatusForAction, describeServiceActionBlock } = await import(
+    path.join(projectRoot, "dist/lib.js")
+  );
+
+  assert.equal(optimisticStatusForAction("start"), "starting");
+  assert.equal(optimisticStatusForAction("stop"), "stopping");
+  assert.equal(optimisticStatusForAction("restart"), "restarting");
+  assert.equal(optimisticStatusForAction("pull"), "restarting");
+  assert.equal(optimisticStatusForAction("checkout"), "restarting");
+  assert.equal(optimisticStatusForAction("install"), "installing");
+  assert.equal(optimisticStatusForAction("clear-logs"), null);
+
+  const service = { service: "api", status: "starting", installCommand: null };
+  assert.equal(
+    describeServiceActionBlock("start", { ...service }),
+    "api cannot be started from status starting.",
+  );
+  assert.equal(
+    describeServiceActionBlock("stop", { ...service, status: "stopped" }),
+    "api cannot be killed from status stopped.",
+  );
+  assert.equal(
+    describeServiceActionBlock("restart", { ...service, status: "starting" }),
+    "api cannot restart from status starting.",
+  );
+  assert.equal(
+    describeServiceActionBlock("install", { ...service, installCommand: null }),
+    "api has no install command configured.",
+  );
+  assert.equal(
+    describeServiceActionBlock("install", { ...service, installCommand: "yarn" }),
+    "api cannot install from status starting.",
+  );
+  assert.equal(
+    describeServiceActionBlock("pull", { ...service }),
+    "api cannot pull from status starting.",
+  );
+  assert.equal(
+    describeServiceActionBlock("checkout", { ...service }),
+    "api cannot switch branch from status starting.",
+  );
 });

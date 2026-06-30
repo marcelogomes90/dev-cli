@@ -230,6 +230,9 @@ The header shows the project name, running service count, and live CPU/RAM usage
 - `e`: open the selected service directory in the configured editor
 - `t`: open a full-screen embedded terminal for the selected service directory
 - `x`: kill the embedded terminal for the selected service
+- `Shift+S`: start all services
+- `Shift+K`: kill all services (asks for confirmation)
+- `Shift+R`: restart all services (asks for confirmation)
 - `?`: open a shortcut help modal with the full list of available keys
 - `Esc` inside the embedded terminal: hide it and return to the UI; press `t` again to resume the same session for that service
 

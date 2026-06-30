@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { ProjectConfig } from "../config";
 import { AppError } from "../../utils/errors";
-import { isProcessAlive } from "../../utils/process";
+import { isProcessAlive, killProcess } from "../../utils/process";
 import { clearSupervisorFiles } from "./paths";
 import { loadSupervisorState } from "./state";
 import type {
@@ -154,7 +154,16 @@ export async function ensureSupervisor(config: ProjectConfig): Promise<void> {
   });
   child.unref();
 
-  await waitForSocket(config.project);
+  try {
+    await waitForSocket(config.project);
+  } catch (error) {
+    // The daemon was spawned detached (its own process group). If it never bound the
+    // socket, kill the group so a failed launch doesn't leave an orphaned supervisor.
+    if (typeof child.pid === "number") {
+      killProcess(-child.pid, "SIGTERM");
+    }
+    throw error;
+  }
 }
 
 export async function sendSupervisorRequest(

@@ -1,5 +1,6 @@
 import type { ManagedServiceState, SupervisorState } from "../core/supervisor";
 import { formatBytes } from "./bytes";
+import { formatRelativeAge } from "./format";
 import type { LogCache } from "./logs";
 import { fg, muted, truncate, UI_THEME } from "./theme";
 
@@ -55,34 +56,6 @@ function formatStatus(status: ManagedServiceState["status"], width: number, text
   const label = fg(textColor, text.slice(1));
 
   return `${indicator}${label}`;
-}
-
-function formatRelativeAge(value: string | null, now = Date.now()): string {
-  if (!value) {
-    return "--";
-  }
-
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) {
-    return "--";
-  }
-
-  const seconds = Math.max(Math.floor((now - parsed) / 1000), 0);
-  if (seconds < 60) {
-    return `${seconds}s`;
-  }
-
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) {
-    return `${minutes}m`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) {
-    return `${hours}h`;
-  }
-
-  return `${Math.floor(hours / 24)}d`;
 }
 
 function getServiceAgeLabel(service: ManagedServiceState, now: number): string {
@@ -233,8 +206,101 @@ export function buildServiceContent(
   };
 }
 
-function formatShortcutLabel(label: string): string {
-  return label;
+export type ServiceAction =
+  | "start"
+  | "stop"
+  | "restart"
+  | "install"
+  | "clear-logs"
+  | "pull"
+  | "checkout";
+
+// Stable (non-transitional) statuses from which install/pull/checkout are allowed.
+const STABLE_SERVICE_STATUSES: ReadonlySet<ManagedServiceState["status"]> = new Set([
+  "stopped",
+  "failed",
+  "running",
+]);
+
+/**
+ * Single source of truth for whether an action is available on a service. Both the footer
+ * shortcuts (what the user sees) and the action guards in the TUI (what is enforced) consult
+ * this, so the two can never drift apart.
+ */
+export function canPerformServiceAction(
+  action: ServiceAction,
+  service: ManagedServiceState | null,
+  context: { hasLogs?: boolean } = {},
+): boolean {
+  if (!service) {
+    return false;
+  }
+
+  switch (action) {
+    case "start":
+      return service.status === "stopped" || service.status === "failed";
+    case "stop":
+      return service.status === "running" || service.status === "starting" || service.status === "failed";
+    case "restart":
+      // Failed services are recoverable via restart (the daemon starts them again).
+      return service.status === "running" || service.status === "failed";
+    case "install":
+      return Boolean(service.installCommand) && STABLE_SERVICE_STATUSES.has(service.status);
+    case "clear-logs":
+      return Boolean(context.hasLogs);
+    case "pull":
+    case "checkout":
+      return Boolean(service.isGit) && STABLE_SERVICE_STATUSES.has(service.status);
+    default:
+      return false;
+  }
+}
+
+/** Human-readable reason an action is currently blocked, shown in the footer. */
+export function describeServiceActionBlock(
+  action: ServiceAction,
+  service: ManagedServiceState,
+): string {
+  switch (action) {
+    case "start":
+      return `${service.service} cannot be started from status ${service.status}.`;
+    case "stop":
+      return `${service.service} cannot be killed from status ${service.status}.`;
+    case "restart":
+      return `${service.service} cannot restart from status ${service.status}.`;
+    case "install":
+      return service.installCommand
+        ? `${service.service} cannot install from status ${service.status}.`
+        : `${service.service} has no install command configured.`;
+    case "clear-logs":
+      return `${service.service} has no logs to clear.`;
+    case "pull":
+      return `${service.service} cannot pull from status ${service.status}.`;
+    case "checkout":
+      return `${service.service} cannot switch branch from status ${service.status}.`;
+    default:
+      return `${service.service} cannot ${action} from status ${service.status}.`;
+  }
+}
+
+/** Transient status to show optimistically while an action is in flight. */
+export function optimisticStatusForAction(
+  action: ServiceAction,
+): ManagedServiceState["status"] | null {
+  switch (action) {
+    case "install":
+      return "installing";
+    case "pull":
+    case "checkout":
+    case "restart":
+      return "restarting";
+    case "start":
+      return "starting";
+    case "stop":
+      return "stopping";
+    default:
+      return null;
+  }
 }
 
 export function buildShortcutItems(
@@ -243,42 +309,32 @@ export function buildShortcutItems(
   hasActiveTerminalSession = false,
 ): ShortcutItem[] {
   const shortcuts: ShortcutItem[] = [{ label: "[↑/↓] Move", priority: 100 }];
-  const canInstall = selected?.installCommand && (
-    selected.status === "stopped" ||
-    selected.status === "failed" ||
-    selected.status === "running"
-  );
-  const canUseGit = selected?.isGit && (
-    selected.status === "stopped" ||
-    selected.status === "failed" ||
-    selected.status === "running"
-  );
 
-  if (selected && (selected.status === "stopped" || selected.status === "failed")) {
+  if (canPerformServiceAction("start", selected)) {
     shortcuts.push({ label: "[s/Enter] Start", priority: 95 });
   }
 
-  if (canInstall) {
+  if (canPerformServiceAction("install", selected)) {
     shortcuts.push({ label: "[i] Install", priority: 92 });
   }
 
-  if (selected && (selected.status === "running" || selected.status === "starting" || selected.status === "failed")) {
+  if (canPerformServiceAction("stop", selected)) {
     shortcuts.push({ label: "[k] Kill", priority: 94 });
   }
 
-  if (selected?.status === "running") {
+  if (canPerformServiceAction("restart", selected)) {
     shortcuts.push({ label: "[r] Restart", priority: 90 });
   }
 
-  if (canUseGit) {
+  if (canPerformServiceAction("pull", selected)) {
     shortcuts.push({ label: "[p] Pull", priority: 80 });
   }
 
-  if (canUseGit) {
+  if (canPerformServiceAction("checkout", selected)) {
     shortcuts.push({ label: "[d] Branch", priority: 78 });
   }
 
-  if (hasLogs) {
+  if (canPerformServiceAction("clear-logs", selected, { hasLogs })) {
     shortcuts.push({ label: "[c] Clear logs", priority: 70 });
   }
 
@@ -308,6 +364,6 @@ export function buildShortcutLine(
   hasActiveTerminalSession = false,
 ): string {
   return buildShortcutItems(selected, hasLogs, hasActiveTerminalSession)
-    .map((shortcut) => formatShortcutLabel(shortcut.label))
+    .map((shortcut) => shortcut.label)
     .join(" | ");
 }

@@ -47,6 +47,7 @@ interface ManagedServiceContext {
 const BRANCH_REFRESH_INTERVAL_MS = 10_000;
 const DEFAULT_STOP_TIMEOUT_MS = 3_000;
 const DEFAULT_KILL_TIMEOUT_MS = 2_000;
+const MAX_REQUEST_BYTES = 1024 * 1024;
 const RESOURCE_MEMORY_STEP_BYTES = 1024 * 1024;
 const RESOURCE_METRIC_STATUSES = new Set<ManagedServiceState["status"]>([
   "installing",
@@ -86,13 +87,13 @@ export class SupervisorDaemon {
   private readonly config: ProjectConfig;
   private readonly expectedStops = new WeakSet<ManagedChild>();
   private readonly handleExit = () => {
-    void rm(this.paths.socketPath, { force: true });
+    void rm(this.paths.socketPath, { force: true }).catch(() => {});
   };
   private readonly handleSigint = () => {
-    void this.shutdown();
+    void this.shutdown().catch((error) => this.logDaemonError("shutdown", error));
   };
   private readonly handleSigterm = () => {
-    void this.shutdown();
+    void this.shutdown().catch((error) => this.logDaemonError("shutdown", error));
   };
   private readonly paths;
   private readonly refreshInterval: NodeJS.Timeout;
@@ -128,22 +129,41 @@ export class SupervisorDaemon {
     };
 
     this.server = net.createServer((socket) => {
+      // The protocol is one newline-delimited request per connection, answered with a
+      // single response. We read until the first newline, handle that request, and ignore
+      // anything else on the connection.
       let raw = "";
+      let handled = false;
       socket.setEncoding("utf8");
+      socket.on("error", (error) => {
+        this.logDaemonError("client socket", error);
+        socket.destroy();
+      });
       socket.on("data", (chunk) => {
-        raw += chunk;
-        if (!raw.includes("\n")) {
+        if (handled) {
           return;
         }
 
-        const line = raw.slice(0, raw.indexOf("\n"));
-        raw = raw.slice(raw.indexOf("\n") + 1);
-        void this.enqueueRequest(line, socket);
+        raw += chunk;
+        if (raw.length > MAX_REQUEST_BYTES) {
+          handled = true;
+          socket.end(JSON.stringify({ id: "unknown", ok: false, message: "Request too large." }) + "\n");
+          return;
+        }
+
+        const newlineIndex = raw.indexOf("\n");
+        if (newlineIndex === -1) {
+          return;
+        }
+
+        handled = true;
+        const line = raw.slice(0, newlineIndex);
+        void this.enqueueRequest(line, socket).catch((error) => this.logDaemonError("request", error));
       });
     });
 
     this.refreshInterval = setInterval(() => {
-      void this.refreshDerivedState();
+      void this.refreshDerivedState().catch((error) => this.logDaemonError("refresh", error));
     }, 1_000);
   }
 
@@ -162,12 +182,16 @@ export class SupervisorDaemon {
     this.server.on("error", (error) => {
       console.error(`[dev-cli] supervisor socket error: ${getErrorMessage(error)}`);
       process.exitCode = 1;
-      void this.shutdown();
+      void this.shutdown().catch((shutdownError) => this.logDaemonError("shutdown", shutdownError));
     });
 
     process.on("SIGINT", this.handleSigint);
     process.on("SIGTERM", this.handleSigterm);
     process.on("exit", this.handleExit);
+  }
+
+  private logDaemonError(context: string, error: unknown): void {
+    console.error(`[dev-cli] ${context} error: ${getErrorMessage(error)}`);
   }
 
   private async enqueueRequest(raw: string, socket: net.Socket): Promise<void> {
@@ -618,12 +642,13 @@ export class SupervisorDaemon {
     });
 
     const managed = this.registerChild(serviceName, child);
-    child.stdout.on("data", (chunk) => {
-      void this.appendServiceLog(serviceName, chunk.toString());
-    });
-    child.stderr.on("data", (chunk) => {
-      void this.appendServiceLog(serviceName, chunk.toString());
-    });
+    const handleLogChunk = (chunk: Buffer | string) => {
+      void this.appendServiceLog(serviceName, chunk.toString()).catch((error) =>
+        this.logDaemonError(`log ${serviceName}`, error),
+      );
+    };
+    child.stdout.on("data", handleLogChunk);
+    child.stderr.on("data", handleLogChunk);
 
     return managed;
   }
@@ -956,7 +981,7 @@ export class SupervisorDaemon {
       await this.runHooks(this.config.hooks.afterUp);
     }
 
-    void this.refreshDerivedState(true);
+    void this.refreshDerivedState(true).catch((error) => this.logDaemonError("refresh", error));
     return results;
   }
 
@@ -1031,6 +1056,17 @@ export class SupervisorDaemon {
 }
 
 export async function runSupervisorFromEnv(): Promise<void> {
+  // The supervisor is a long-lived daemon: a single transient I/O failure (full disk,
+  // permission hiccup) must never tear it down and orphan every managed service. Node
+  // exits the process on unhandled rejections/exceptions by default, so we log and keep
+  // running instead.
+  process.on("unhandledRejection", (reason) => {
+    console.error(`[dev-cli] unhandled rejection: ${getErrorMessage(reason)}`);
+  });
+  process.on("uncaughtException", (error) => {
+    console.error(`[dev-cli] uncaught exception: ${getErrorMessage(error)}`);
+  });
+
   const project = process.env.DEVCLI_PROJECT;
   const cwd = process.env.DEVCLI_CWD;
 

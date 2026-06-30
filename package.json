@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/index.ts --help",
-    "test": "yarn build && node --test test/*.test.mjs"
+    "test": "yarn build && node --test --test-force-exit test/*.test.mjs"
   },
   "engines": {
     "node": ">=20.14.0"

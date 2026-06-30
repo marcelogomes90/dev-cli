@@ -4,11 +4,12 @@ import type { ProjectConfig } from "../core/config";
 import {
   checkoutSupervisorBranch,
   controlSupervisor,
+  loadSupervisorState,
   pullSupervisorBranch,
-  readSupervisorState,
 } from "../core/supervisor";
 import type { ManagedServiceState, SupervisorResponse, SupervisorState } from "../core/supervisor";
 import { getErrorMessage } from "../utils/errors";
+import { isProcessAlive } from "../utils/process";
 import {
   openActionModal,
   type ActionModalController,
@@ -38,6 +39,10 @@ import {
   buildServiceContent,
   buildShortcutItems,
   buildShortcutLine,
+  canPerformServiceAction,
+  describeServiceActionBlock,
+  optimisticStatusForAction,
+  type ServiceAction,
   type ServiceRenderResult,
   type ShortcutItem,
 } from "./services";
@@ -69,7 +74,7 @@ export {
 export { buildHeaderContent, getSupervisorPaneLayout, type SupervisorPaneLayout } from "./layout";
 export { buildLogViewerCommand, launchExternalLogViewer, type LogViewerCommand } from "./logs";
 export { computeCpuPercent, formatResourceMetrics, parseDarwinMemoryUsage, type CpuSnapshot, type ResourceMetrics } from "./metrics";
-export { buildServiceContent, buildShortcutItems, buildShortcutLine, type ServiceRenderResult, type ShortcutItem } from "./services";
+export { buildServiceContent, buildShortcutItems, buildShortcutLine, canPerformServiceAction, describeServiceActionBlock, optimisticStatusForAction, type ServiceAction, type ServiceRenderResult, type ShortcutItem } from "./services";
 export { calculateActionModalLayout, formatActionModalInputValue, type ActionModalLayout } from "./action-modal";
 
 type UiMode = "modal" | "navigate" | "terminal";
@@ -83,6 +88,7 @@ const METRICS_REFRESH_MS = 1_000;
 const SCREEN_POLL_MS = 500;
 const SCREEN_RENDER_DEBOUNCE_MS = 16;
 const BACKGROUND_LOG_REFRESH_MS = 2_000;
+const FOOTER_MESSAGE_TTL_MS = 4_000;
 
 export interface TuiProgramOptions {
   input?: NodeJS.ReadableStream;
@@ -437,6 +443,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     let visibleEmbeddedTerminalService: string | null = null;
     let lastModalInteractionAt = 0;
     let lastTerminalEscapeAt = 0;
+    let footerMessageTimer: NodeJS.Timeout | null = null;
+    let footerShowsIdleStatus = false;
     let lastMetricsRefreshAt = 0;
     let lastBackgroundLogRefreshAt = Date.now();
     let lastFooterContent = "";
@@ -461,8 +469,42 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     const pendingServiceActions = new Map<string, string>();
     const embeddedTerminalSessions = new Map<string, EmbeddedTerminalController>();
 
+    const clearFooterMessageTimer = () => {
+      if (footerMessageTimer) {
+        clearTimeout(footerMessageTimer);
+        footerMessageTimer = null;
+      }
+    };
+
     const setFooterMessage = (tone: MessageTone, text: string) => {
       footerMessage = { text, tone };
+      footerShowsIdleStatus = false;
+      clearFooterMessageTimer();
+      // Transient info/success notices fade back to a contextual status line; warnings/errors
+      // persist until the next action so the user does not miss them.
+      if (tone === "info" || tone === "success") {
+        footerMessageTimer = setTimeout(() => {
+          footerMessageTimer = null;
+          footerShowsIdleStatus = true;
+          if (!screenClosed) {
+            renderFooter();
+            requestScreenRender();
+          }
+        }, FOOTER_MESSAGE_TTL_MS);
+      }
+    };
+
+    const buildIdleFooterText = (): string => {
+      const selected = getSelectedService();
+      if (!selected) {
+        return state ? "Select a service to manage it." : "Supervisor is not running.";
+      }
+
+      const segments = [selected.service, selected.status];
+      if (selected.isGit && selected.branch && selected.branch !== "-") {
+        segments.push(selected.branch);
+      }
+      return segments.join(" · ");
     };
 
     const requestScreenRender = (immediate = false) => {
@@ -530,6 +572,25 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
 
       return embeddedTerminalSessions.get(serviceName)?.isAlive() ?? false;
     };
+
+    const computeServiceContent = (currentState: SupervisorState): ServiceRenderResult =>
+      buildServiceContent(
+        currentState,
+        selectedService,
+        Number(screen.width),
+        logCaches,
+        getActiveEmbeddedTerminalServices(),
+      );
+
+    const computeServiceRenderKey = (currentState: SupervisorState): string =>
+      buildServiceRenderKey(
+        currentState,
+        selectedService,
+        Number(screen.width),
+        Number(screen.height),
+        logCacheVersion,
+        getActiveEmbeddedTerminalServices(),
+      );
 
     const hideVisibleEmbeddedTerminal = ({
       notify = true,
@@ -674,9 +735,9 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
 
     const renderFooter = (): boolean => {
       const selected = getSelectedService();
-      const message = footerMessage.text;
+      const message = footerShowsIdleStatus ? buildIdleFooterText() : footerMessage.text;
       const busyAction = getSelectedBusyAction();
-      const tone = busyAction ? "warning" : footerMessage.tone;
+      const tone = busyAction ? "warning" : footerShowsIdleStatus ? "info" : footerMessage.tone;
       const footerInset = Number(screen.width) > 48 ? 2 : 1;
       const inset = " ".repeat(footerInset);
       const availableWidth = Math.max(Number(screen.width) - 2 - footerInset * 2, 10);
@@ -835,17 +896,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
             logCacheVersion += 1;
           }
           if (cacheChanged && state) {
-            dirty = applyServiceRender(
-              buildServiceContent(state, selectedService, Number(screen.width), logCaches, getActiveEmbeddedTerminalServices()),
-            ) || dirty;
-            lastRenderedSelectionKey = buildServiceRenderKey(
-              state,
-              selectedService,
-              Number(screen.width),
-              Number(screen.height),
-              logCacheVersion,
-              getActiveEmbeddedTerminalServices(),
-            );
+            dirty = applyServiceRender(computeServiceContent(state)) || dirty;
+            lastRenderedSelectionKey = computeServiceRenderKey(state);
           }
           if (selectedService === serviceName) {
             dirty = applyLogContent(serviceName) || dirty;
@@ -952,7 +1004,11 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       try {
         let dirty = applyPaneLayout();
         refreshResourceMetrics();
-        state = await readSupervisorState(config.project);
+        // Read the state file directly instead of readSupervisorState: the latter pings the
+        // daemon socket every tick and, on a transient failure, deletes the supervisor dir.
+        // A cheap pid liveness check is enough for rendering; command paths still self-heal.
+        const loadedState = await loadSupervisorState(config.project);
+        state = loadedState && isProcessAlive(loadedState.pid) ? loadedState : null;
         if (!state) {
           header.show();
           footer.show();
@@ -982,24 +1038,10 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         const selectedChanged = nextSelected !== selectedService;
         selectedService = nextSelected;
 
-        const activeEmbeddedTerminalServices = getActiveEmbeddedTerminalServices();
-        const serviceRenderKey = buildServiceRenderKey(
-          state,
-          selectedService,
-          Number(screen.width),
-          Number(screen.height),
-          logCacheVersion,
-          activeEmbeddedTerminalServices,
-        );
+        const serviceRenderKey = computeServiceRenderKey(state);
         let currentServiceRender = lastServiceRender;
         if (serviceRenderKey !== lastRenderedSelectionKey || !currentServiceRender) {
-          currentServiceRender = buildServiceContent(
-            state,
-            selectedService,
-            Number(screen.width),
-            logCaches,
-            activeEmbeddedTerminalServices,
-          );
+          currentServiceRender = computeServiceContent(state);
           dirty = applyServiceRender(currentServiceRender) || dirty;
           lastRenderedSelectionKey = serviceRenderKey;
         }
@@ -1050,9 +1092,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       selectedService = serviceNames[nextIndex] ?? selectedService;
       if (state) {
         logPinnedToBottom = true;
-        let dirty = applyServiceRender(
-          buildServiceContent(state, selectedService, Number(screen.width), logCaches, getActiveEmbeddedTerminalServices()),
-        );
+        let dirty = applyServiceRender(computeServiceContent(state));
         dirty = applyLogContent(selectedService) || dirty;
         if (selectedService) {
           refreshLogCache(selectedService);
@@ -1081,17 +1121,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       logCacheVersion += 1;
       logPinnedToBottom = true;
       if (state) {
-        applyServiceRender(
-          buildServiceContent(state, selectedService, Number(screen.width), logCaches, getActiveEmbeddedTerminalServices()),
-        );
-        lastRenderedSelectionKey = buildServiceRenderKey(
-          state,
-          selectedService,
-          Number(screen.width),
-          Number(screen.height),
-          logCacheVersion,
-          getActiveEmbeddedTerminalServices(),
-        );
+        applyServiceRender(computeServiceContent(state));
+        lastRenderedSelectionKey = computeServiceRenderKey(state);
       }
       applyLogContent(serviceName);
       renderFooter();
@@ -1161,11 +1192,16 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
           { label: "[?] Help", priority: 99 },
         ]
         : mode === "navigate"
-          ? buildShortcutItems(
-            selected,
-            selectedHasLogs(),
-            hasActiveEmbeddedTerminalSession(selected?.service ?? null),
-          )
+          ? [
+            ...buildShortcutItems(
+              selected,
+              selectedHasLogs(),
+              hasActiveEmbeddedTerminalSession(selected?.service ?? null),
+            ),
+            { label: "[Shift+S] Start all", priority: 3 },
+            { label: "[Shift+K] Kill all", priority: 2 },
+            { label: "[Shift+R] Restart all", priority: 1 },
+          ]
           : [];
 
       mode = "modal";
@@ -1199,8 +1235,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return;
       }
 
-      if (selected.status !== "stopped" && selected.status !== "failed" && selected.status !== "running") {
-        setFooterMessage("warning", `${selected.service} cannot switch branch from status ${selected.status}.`);
+      if (!canPerformServiceAction("checkout", selected)) {
+        setFooterMessage("warning", describeServiceActionBlock("checkout", selected));
         void render();
         return;
       }
@@ -1250,8 +1286,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return;
       }
 
-      if (selected.status !== "stopped" && selected.status !== "failed" && selected.status !== "running") {
-        setFooterMessage("warning", `${selected.service} cannot pull from status ${selected.status}.`);
+      if (!canPerformServiceAction("pull", selected)) {
+        setFooterMessage("warning", describeServiceActionBlock("pull", selected));
         void render();
         return;
       }
@@ -1297,6 +1333,18 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       void render();
     };
 
+    // The embedded terminal is a full-screen takeover. Hiding the main panes prevents their
+    // content from bleeding through any gaps in the terminal box (e.g. wide glyphs). render()
+    // re-shows them when the mode returns to "navigate".
+    const hideMainPanes = () => {
+      header.hide();
+      servicesFrameBox.hide();
+      servicesHeaderBox.hide();
+      servicesBox.hide();
+      logBox.hide();
+      footer.hide();
+    };
+
     const openEmbeddedTerminalForSelectedService = () => {
       const service = getSelectedService();
       if (!service) {
@@ -1312,6 +1360,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         if (existingSession.isAlive()) {
           visibleEmbeddedTerminalService = service.service;
           mode = "terminal";
+          hideMainPanes();
           existingSession.show();
           setFooterMessage("info", `Terminal resumed for ${service.service} in ${service.cwd}.`);
           renderFooter();
@@ -1329,6 +1378,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       try {
         mode = "terminal";
         visibleEmbeddedTerminalService = service.service;
+        hideMainPanes();
         const session = openEmbeddedTerminal({
           cwd: service.cwd,
           screen,
@@ -1429,19 +1479,12 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       }
 
       pendingServiceActions.set(serviceName, actionName);
+      const optimisticStatus = optimisticStatusForAction(actionName as ServiceAction);
       if (state?.services[serviceName]) {
-        if (actionName === "install") {
-          state.services[serviceName].status = "installing";
-        } else if (actionName === "pull" || actionName === "checkout" || actionName === "restart") {
-          state.services[serviceName].status = "restarting";
-        } else if (actionName === "start") {
-          state.services[serviceName].status = "starting";
-        } else if (actionName === "stop") {
-          state.services[serviceName].status = "stopping";
+        if (optimisticStatus) {
+          state.services[serviceName].status = optimisticStatus;
         }
-        applyServiceRender(
-          buildServiceContent(state, selectedService, Number(screen.width), logCaches, getActiveEmbeddedTerminalServices()),
-        );
+        applyServiceRender(computeServiceContent(state));
         applyLogContent(selectedService);
       }
       renderFooter();
@@ -1470,43 +1513,8 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return;
       }
 
-      if (action === "start" && selected.status !== "stopped" && selected.status !== "failed") {
-        setFooterMessage("warning", `${selected.service} cannot be started from status ${selected.status}.`);
-        void render();
-        return;
-      }
-
-      if (action === "install" && !selected.installCommand) {
-        setFooterMessage("warning", `${selected.service} has no install command configured.`);
-        void render();
-        return;
-      }
-
-      if (
-        action === "install" &&
-        selected.status !== "stopped" &&
-        selected.status !== "failed" &&
-        selected.status !== "running"
-      ) {
-        setFooterMessage("warning", `${selected.service} cannot install from status ${selected.status}.`);
-        void render();
-        return;
-      }
-
-      if (action === "restart" && selected.status !== "running" && selected.status !== "failed") {
-        setFooterMessage("warning", `${selected.service} cannot restart from status ${selected.status}.`);
-        void render();
-        return;
-      }
-
-      if (action === "stop" && selected.status !== "running" && selected.status !== "starting" && selected.status !== "failed") {
-        setFooterMessage("warning", `${selected.service} cannot be killed from status ${selected.status}.`);
-        void render();
-        return;
-      }
-
-      if (action === "clear-logs" && !selectedHasLogs()) {
-        setFooterMessage("warning", `${selected.service} has no logs to clear.`);
+      if (!canPerformServiceAction(action, selected, { hasLogs: selectedHasLogs() })) {
+        setFooterMessage("warning", describeServiceActionBlock(action, selected));
         void render();
         return;
       }
@@ -1596,7 +1604,68 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       }, `${prefix} failed.`);
     };
 
+    const getAllServiceNames = (): string[] => (state ? Object.keys(state.services) : []);
+
+    const runBatchAction = (
+      action: "start" | "stop" | "restart",
+      progressMessage: string,
+      fallback: string,
+    ) => {
+      const names = getAllServiceNames();
+      if (names.length === 0) {
+        setFooterMessage("warning", "No services available.");
+        void render();
+        return;
+      }
+
+      setFooterMessage("info", progressMessage);
+      renderFooter();
+      requestScreenRender(true);
+      void runAction(() => controlSupervisor(config, action, names), fallback);
+    };
+
+    const startAllServices = () => {
+      runBatchAction("start", "Starting all services...", "Start all failed.");
+    };
+
+    const confirmBatchAction = (
+      title: string,
+      message: string,
+      cancelMessage: string,
+      confirmLabel: string,
+      onConfirm: () => void,
+    ) => {
+      if (getAllServiceNames().length === 0) {
+        setFooterMessage("warning", "No services available.");
+        void render();
+        return;
+      }
+
+      openServiceActionModal({ cancelMessage, confirmLabel, message, onConfirm, title });
+    };
+
+    const stopAllServices = () => {
+      confirmBatchAction(
+        "Stop all",
+        "Stop all services?",
+        "Stop all cancelled.",
+        "Stop all",
+        () => runBatchAction("stop", "Stopping all services...", "Stop all failed."),
+      );
+    };
+
+    const restartAllServices = () => {
+      confirmBatchAction(
+        "Restart all",
+        "Restart all services?",
+        "Restart all cancelled.",
+        "Restart all",
+        () => runBatchAction("restart", "Restarting all services...", "Restart all failed."),
+      );
+    };
+
     const closeScreen = () => {
+      clearFooterMessageTimer();
       actionModal?.destroy({ notify: false, render: false });
       actionModal = null;
       destroyAllEmbeddedTerminalSessions({ notify: false, render: false });
@@ -1719,6 +1788,21 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         killEmbeddedTerminalSessionForSelectedService();
       }
     });
+    screen.key(["S-s"], () => {
+      if (mode === "navigate") {
+        startAllServices();
+      }
+    });
+    screen.key(["S-k"], () => {
+      if (mode === "navigate") {
+        stopAllServices();
+      }
+    });
+    screen.key(["S-r"], () => {
+      if (mode === "navigate") {
+        restartAllServices();
+      }
+    });
     screen.key(["?"], () => {
       if (isEmbeddedTerminalVisible()) {
         return;
@@ -1825,6 +1909,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
 
     screen.on("destroy", () => {
       screenClosed = true;
+      clearFooterMessageTimer();
       actionModal?.destroy({ notify: false, render: false });
       actionModal = null;
       destroyAllEmbeddedTerminalSessions({ notify: false, render: false });

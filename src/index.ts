@@ -1,3 +1,10 @@
 import { createCli } from "./cli";
+import { getErrorMessage } from "./utils/errors";
+import { printError } from "./ui/output";
 
-void createCli().parseAsync(process.argv);
+createCli()
+  .parseAsync(process.argv)
+  .catch((error) => {
+    printError(getErrorMessage(error));
+    process.exitCode = 1;
+  });

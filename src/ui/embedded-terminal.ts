@@ -58,6 +58,7 @@ const INITIAL_INPUT_READY_DELAY_MS = 250;
 const NODE_PTY_HELPER_MODE = 0o755;
 const PROMPT_SETTLE_DELAY_MS = 120;
 const TERMINAL_RENDER_DEBOUNCE_MS = 16;
+const FULL_REPAINT_THROTTLE_MS = 90;
 const TERMINAL_ENVIRONMENT_STRIP_PATTERN = /^(TERM_PROGRAM|TERMINAL|ITERM|LC_TERMINAL|WEZTERM|VTE|KITTY|WT_|GHOSTTY|BOLD|TABBY|VSCODE|TMUX|TMUX_)/;
 const require = createRequire(import.meta.url);
 const { Terminal: XtermTerminal } = xtermHeadless as typeof import("@xterm/headless");
@@ -417,6 +418,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
   let lastCloseRequestAt = 0;
   let lastRenderedContent = "";
   let lastRenderedLabel = "";
+  let needsFullRepaint = false;
   let pendingStartupInput: string[] = [];
   let ptyAlive = true;
   let readyTimer: NodeJS.Timeout | null = null;
@@ -460,6 +462,36 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     width: layout.width,
   });
 
+  // Blessed's incremental renderer can leave stale glyphs behind (a redrawn right-prompt, or a
+  // cleared screen with wide nerd-font glyphs whose width it counts differently than xterm).
+  // A full realloc repaint clears those ghosts. To keep normal output smooth we throttle the
+  // full repaint and schedule a trailing one so ghosts always clear shortly after a burst.
+  let lastFullRepaintAt = 0;
+  let fullRepaintTimer: NodeJS.Timeout | null = null;
+
+  const runFullRepaint = () => {
+    forceEmbeddedTerminalViewportRepaint(screen);
+    needsFullRepaint = false;
+    lastFullRepaintAt = Date.now();
+  };
+
+  const performRender = () => {
+    if (needsFullRepaint) {
+      if (Date.now() - lastFullRepaintAt >= FULL_REPAINT_THROTTLE_MS) {
+        runFullRepaint();
+      } else if (!fullRepaintTimer) {
+        fullRepaintTimer = setTimeout(() => {
+          fullRepaintTimer = null;
+          if (!closed && visible && needsFullRepaint) {
+            runFullRepaint();
+            screen.render();
+          }
+        }, FULL_REPAINT_THROTTLE_MS);
+      }
+    }
+    screen.render();
+  };
+
   const requestTerminalRender = (immediate = false) => {
     if (closed || !visible) {
       return;
@@ -470,7 +502,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
         clearTimeout(renderTimer);
         renderTimer = null;
       }
-      screen.render();
+      performRender();
       return;
     }
 
@@ -481,7 +513,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     renderTimer = setTimeout(() => {
       renderTimer = null;
       if (!closed && visible) {
-        screen.render();
+        performRender();
       }
     }, TERMINAL_RENDER_DEBOUNCE_MS);
   };
@@ -494,6 +526,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
 
     terminalBox.setContent(content);
     lastRenderedContent = content;
+    needsFullRepaint = true;
     return true;
   };
 
@@ -565,6 +598,8 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     detachInputListener();
     terminalBox.hide();
     restoreMouseState();
+    // Force a full repaint so the restored panes overwrite every cell the terminal occupied.
+    forceEmbeddedTerminalViewportRepaint(screen);
 
     if (notify) {
       onHide?.();
@@ -607,6 +642,10 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
       clearTimeout(renderTimer);
       renderTimer = null;
     }
+    if (fullRepaintTimer) {
+      clearTimeout(fullRepaintTimer);
+      fullRepaintTimer = null;
+    }
     if (readyTimer) {
       clearTimeout(readyTimer);
       readyTimer = null;
@@ -636,6 +675,8 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     terminalBox.destroy();
     restoreMouseState();
     visible = false;
+    // Force a full repaint so the restored panes overwrite every cell the terminal occupied.
+    forceEmbeddedTerminalViewportRepaint(screen);
 
     if (notify) {
       onDestroy?.();
@@ -728,6 +769,13 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     ptyPath = (pty as IPty & { _pty?: string })._pty ?? null;
     ensureEmbeddedTerminalNoEcho(ptyPath);
   } catch (error) {
+    // If spawn succeeded but a later init step (e.g. disabling echo) threw, the pty is
+    // already running and would otherwise be leaked as an orphan process.
+    try {
+      pty?.kill();
+    } catch {
+      // Ignore: the pty may have never started.
+    }
     restoreMouseState();
     terminal.dispose();
     terminalBox.destroy();
@@ -775,7 +823,7 @@ export function openEmbeddedTerminal(options: EmbeddedTerminalOptions): Embedded
     }
 
     if (scrollEmbeddedTerminalViewport(terminal, direction)) {
-      forceEmbeddedTerminalViewportRepaint(screen);
+      // updateTerminalContent flags a full repaint; the render below clears scrollback ghosts.
       updateTerminalContent();
       requestTerminalRender(true);
     }
