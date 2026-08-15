@@ -1,6 +1,6 @@
 {
   "name": "dev-cli",
-  "version": "1.0.7",
+  "version": "1.1.0",
   "description": "Declarative local environment orchestration CLI",
   "license": "MIT",
   "type": "module",
