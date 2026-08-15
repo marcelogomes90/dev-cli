@@ -41,6 +41,30 @@ export async function isGitRepository(cwd: string): Promise<boolean> {
   }
 }
 
+export interface GitBranchStatus {
+  branch: string;
+  isGit: boolean;
+}
+
+/**
+ * Answers "is this a repo?" and "which branch?" with a single git process: the command fails
+ * outside a work tree, and returns empty output on a detached HEAD.
+ */
+export async function readGitBranchStatus(cwd: string): Promise<GitBranchStatus> {
+  try {
+    const result = await execa("git", ["branch", "--show-current"], {
+      cwd,
+      reject: false,
+    });
+
+    return result.exitCode === 0
+      ? { branch: result.stdout.trim() || "-", isGit: true }
+      : { branch: "-", isGit: false };
+  } catch {
+    return { branch: "-", isGit: false };
+  }
+}
+
 export async function getCurrentBranch(cwd: string): Promise<string> {
   const branch = await runGit(cwd, ["branch", "--show-current"]);
   return branch || "-";

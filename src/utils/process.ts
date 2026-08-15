@@ -28,10 +28,15 @@ export function killProcess(pid: number | null | undefined, signal: NodeJS.Signa
   }
 }
 
+/**
+ * `process.kill(pid, 0)` is a cheap syscall, so polling tightly costs almost nothing and cuts
+ * the tail latency of every stop: a service that dies in 5ms used to keep the caller waiting
+ * for the rest of the poll window.
+ */
 export async function waitForProcessExit(
   pid: number | null | undefined,
   timeoutMs: number,
-  pollMs = 100,
+  pollMs = 25,
 ): Promise<boolean> {
   if (!pid || !isProcessAlive(pid)) {
     return true;
@@ -142,12 +147,15 @@ export async function getProcessTree(rootPid: number | null | undefined): Promis
   return ordered;
 }
 
+export function killProcessTree(tree: readonly number[], signal: NodeJS.Signals): void {
+  for (const pid of tree) {
+    killProcess(pid, signal);
+  }
+}
+
 export async function terminateProcessTree(
   rootPid: number | null | undefined,
   signal: NodeJS.Signals,
 ): Promise<void> {
-  const tree = await getProcessTree(rootPid);
-  for (const pid of tree) {
-    killProcess(pid, signal);
-  }
+  killProcessTree(await getProcessTree(rootPid), signal);
 }

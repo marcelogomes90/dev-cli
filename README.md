@@ -130,6 +130,8 @@ services:
 - Every service must belong to an existing group and must be listed in that group's `services` array.
 - `dependsOn` is only used during `dev up`.
 - `dev up` starts services in dependency phases.
+- Stop and restart also work phase by phase (stop walks them in reverse), and every service inside
+  the same phase is handled concurrently.
 - After one dependency phase is started, the next dependent phase waits 5 seconds before starting.
 - Services in the same dependency phase start together after that shared delay.
 - `--only` accepts group names or service names.
