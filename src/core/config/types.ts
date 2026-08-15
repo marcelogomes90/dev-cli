@@ -13,6 +13,8 @@ export interface HooksConfig {
 
 export interface ServiceConfig {
   name: string;
+  /** Display name shown in the UI. Falls back to the service key. */
+  title: string;
   cwd: string;
   command: string;
   installCommand?: string;
@@ -20,6 +22,7 @@ export interface ServiceConfig {
   autostart: boolean;
   env: Record<string, string>;
   dependsOn: string[];
+  ports: number[];
 }
 
 export interface ProjectConfig {

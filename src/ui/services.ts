@@ -19,6 +19,15 @@ export interface ShortcutItem {
   priority: number;
 }
 
+/**
+ * Every user-facing surface shows the configured title; the service key stays the identifier
+ * used by requests, logs and state lookups. State written before `title` existed falls back
+ * to the key so an already running supervisor keeps rendering.
+ */
+export function getServiceLabel(service: Pick<ManagedServiceState, "service" | "title">): string {
+  return service.title || service.service;
+}
+
 function colorStatusIndicator(status: ManagedServiceState["status"], value: string): string {
   switch (status) {
     case "running":
@@ -167,7 +176,7 @@ export function buildServiceContent(
 
       const rowColor = isSelected ? UI_THEME.accent : UI_THEME.text;
       const marker = isSelected ? fg(UI_THEME.accent, "> ") : "  ";
-      const name = fg(rowColor, truncate(service.service, serviceWidth));
+      const name = fg(rowColor, truncate(getServiceLabel(service), serviceWidth));
       const group = fg(rowColor, truncate(groupName, groupWidth));
       const status = formatStatus(service.status, statusWidth, rowColor);
       const branch = fg(rowColor, truncate(service.isGit ? service.branch : "-", branchWidth));
@@ -261,25 +270,27 @@ export function describeServiceActionBlock(
   action: ServiceAction,
   service: ManagedServiceState,
 ): string {
+  const label = getServiceLabel(service);
+
   switch (action) {
     case "start":
-      return `${service.service} cannot be started from status ${service.status}.`;
+      return `${label} cannot be started from status ${service.status}.`;
     case "stop":
-      return `${service.service} cannot be killed from status ${service.status}.`;
+      return `${label} cannot be killed from status ${service.status}.`;
     case "restart":
-      return `${service.service} cannot restart from status ${service.status}.`;
+      return `${label} cannot restart from status ${service.status}.`;
     case "install":
       return service.installCommand
-        ? `${service.service} cannot install from status ${service.status}.`
-        : `${service.service} has no install command configured.`;
+        ? `${label} cannot install from status ${service.status}.`
+        : `${label} has no install command configured.`;
     case "clear-logs":
-      return `${service.service} has no logs to clear.`;
+      return `${label} has no logs to clear.`;
     case "pull":
-      return `${service.service} cannot pull from status ${service.status}.`;
+      return `${label} cannot pull from status ${service.status}.`;
     case "checkout":
-      return `${service.service} cannot switch branch from status ${service.status}.`;
+      return `${label} cannot switch branch from status ${service.status}.`;
     default:
-      return `${service.service} cannot ${action} from status ${service.status}.`;
+      return `${label} cannot ${action} from status ${service.status}.`;
   }
 }
 

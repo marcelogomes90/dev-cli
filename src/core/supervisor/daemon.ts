@@ -13,6 +13,7 @@ import {
 } from "../git";
 import { AppError, getErrorMessage } from "../../utils/errors";
 import {
+  freePorts,
   isProcessAlive,
   terminateProcessTree,
   waitForProcessExit,
@@ -295,8 +296,12 @@ export class SupervisorDaemon {
         };
       }
       case "shutdown":
-        await this.shutdown();
-        return { id: request.id, ok: true, message: "Supervisor stopped." };
+        return {
+          id: request.id,
+          message: "Supervisor stopped.",
+          ok: true,
+          results: await this.shutdown(),
+        };
       default:
         return { id: request.id, ok: false, message: `Unsupported request type "${request.type}".` };
     }
@@ -661,6 +666,32 @@ export class SupervisorDaemon {
     await writeFile(this.state.services[serviceName].logPath, "");
   }
 
+  /**
+   * A crashed watcher (nodemon, vite, `--inspect`) often survives outside the supervisor's
+   * process tree and keeps holding the port, so the service would start broken. Only ports
+   * declared in the config are touched.
+   */
+  private async releaseServicePorts(serviceName: string): Promise<SupervisorServiceResult[]> {
+    const ports = this.config.services[serviceName]?.ports ?? [];
+    if (ports.length === 0) {
+      return [];
+    }
+
+    const freed = await freePorts(ports);
+    const results: SupervisorServiceResult[] = [];
+
+    for (const { pid, port } of freed) {
+      await this.appendSupervisorLog(serviceName, `Port ${port} was in use by PID ${pid}; killed it.`);
+      results.push({
+        service: serviceName,
+        ok: true,
+        message: `Released port ${port} (PID ${pid})`,
+      });
+    }
+
+    return results;
+  }
+
   private async startService(
     serviceName: string,
     options: { preserveLog?: boolean } = {},
@@ -682,6 +713,8 @@ export class SupervisorDaemon {
     if (!options.preserveLog) {
       await this.clearServiceLogFile(serviceName);
     }
+
+    await this.releaseServicePorts(serviceName);
 
     const managed = this.spawnServiceProcess(serviceName);
     entry.pid = managed.child.pid ?? null;
@@ -1032,9 +1065,9 @@ export class SupervisorDaemon {
     return results;
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(): Promise<SupervisorServiceResult[]> {
     if (this.shuttingDown) {
-      return;
+      return [];
     }
 
     this.shuttingDown = true;
@@ -1044,14 +1077,22 @@ export class SupervisorDaemon {
     process.off("exit", this.handleExit);
 
     await this.runHooks(this.config.hooks.beforeDown);
-    await Promise.all(
-      Object.keys(this.state.services).map((serviceName) => this.stopService(serviceName)),
+    const serviceNames = Object.keys(this.state.services);
+    const results = await Promise.all(
+      serviceNames.map((serviceName) => this.stopService(serviceName)),
     );
     await this.waitForChildrenToExit();
+
+    const portResults = await Promise.all(
+      serviceNames.map((serviceName) => this.releaseServicePorts(serviceName)),
+    );
+    results.push(...portResults.flat());
 
     this.server.close();
     await rm(this.paths.socketPath, { force: true });
     await clearSupervisorFiles(this.config.project);
+
+    return results;
   }
 }
 

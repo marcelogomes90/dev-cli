@@ -2,9 +2,15 @@ import { stat } from "node:fs/promises";
 import pc from "picocolors";
 import Table from "cli-table3";
 import type { ProjectConfig } from "../core/config";
-import type { ManagedServiceState, SupervisorResponse, SupervisorState } from "../core/supervisor";
+import type {
+  ManagedServiceState,
+  SupervisorResponse,
+  SupervisorServiceResult,
+  SupervisorState,
+} from "../core/supervisor";
 import { formatBytes } from "./bytes";
 import { formatRelativeAge } from "./format";
+import { getServiceLabel } from "./services";
 
 export const STATUS_TABLE_HEAD = ["SERVICE", "GROUP", "STATUS", "BRANCH"];
 export const STATUS_LIVE_TABLE_HEAD = ["SERVICE", "GROUP", "STATUS", "BRANCH", "PID", "UPTIME", "MEM", "CPU", "LOG"];
@@ -29,6 +35,17 @@ export function printWarning(message: string): void {
 
 export function printError(message: string): void {
   console.error(pc.red(message));
+}
+
+export function printDetail(message: string): void {
+  console.log(pc.dim(`  ${message}`));
+}
+
+export function formatServiceResultLine(
+  result: SupervisorServiceResult,
+  label: string,
+): string {
+  return `${result.ok ? "✓" : "✗"} ${label}: ${result.message}`;
 }
 
 export function formatSupervisorResponseSummary(
@@ -111,7 +128,7 @@ export function buildStatusRowsFromConfig(config: ProjectConfig): string[][] {
 
   for (const [groupName, group] of Object.entries(config.groups)) {
     for (const serviceName of group.services) {
-      rows.push([serviceName, groupName, colorStatus("stopped"), "-"]);
+      rows.push([config.services[serviceName]?.title ?? serviceName, groupName, colorStatus("stopped"), "-"]);
     }
   }
 
@@ -129,7 +146,7 @@ export function buildStatusRowsFromState(state: SupervisorState): string[][] {
       }
 
       rows.push([
-        service.service,
+        getServiceLabel(service),
         groupName,
         colorStatus(service.status),
         service.isGit ? service.branch : "-",
@@ -157,6 +174,7 @@ export function buildStatusTableFromConfig(config: ProjectConfig): StatusTableDa
     pid: null,
     service: service.name,
     status: "stopped" as const,
+    title: service.title,
   }));
 
   return {
@@ -178,7 +196,7 @@ export async function buildStatusTableFromState(state: SupervisorState): Promise
       }
 
       rows.push([
-        service.service,
+        getServiceLabel(service),
         groupName,
         colorStatus(service.status),
         service.isGit ? service.branch : "-",

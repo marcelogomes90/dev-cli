@@ -36,6 +36,7 @@ export interface ManagedServiceState {
   cpuPercent: number | null;
   service: string;
   status: ManagedServiceStatus;
+  title: string;
 }
 
 export interface SupervisorState {

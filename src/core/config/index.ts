@@ -26,6 +26,14 @@ function normalizeHookCommands(hooks: ProjectConfigInput["hooks"]): HooksConfig 
   };
 }
 
+function normalizePorts(port: number | number[] | undefined): number[] {
+  if (port === undefined) {
+    return [];
+  }
+
+  return typeof port === "number" ? [port] : [...new Set(port)];
+}
+
 function resolvePathValue(value: string, rootDir: string): string {
   if (value.startsWith("~/")) {
     return path.join(os.homedir(), value.slice(2));
@@ -154,6 +162,8 @@ export async function loadProjectConfig(projectName: string, cwd = process.cwd()
         group: service.group,
         installCommand: service.installCommand,
         name: serviceName,
+        ports: normalizePorts(service.port),
+        title: service.title ?? serviceName,
       },
     ]),
   );

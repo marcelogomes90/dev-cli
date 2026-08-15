@@ -41,6 +41,7 @@ import {
   buildShortcutLine,
   canPerformServiceAction,
   describeServiceActionBlock,
+  getServiceLabel,
   optimisticStatusForAction,
   type ServiceAction,
   type ServiceRenderResult,
@@ -74,7 +75,7 @@ export {
 export { buildHeaderContent, getSupervisorPaneLayout, type SupervisorPaneLayout } from "./layout";
 export { buildLogViewerCommand, launchExternalLogViewer, type LogViewerCommand } from "./logs";
 export { computeCpuPercent, formatResourceMetrics, parseDarwinMemoryUsage, type CpuSnapshot, type ResourceMetrics } from "./metrics";
-export { buildServiceContent, buildShortcutItems, buildShortcutLine, canPerformServiceAction, describeServiceActionBlock, optimisticStatusForAction, type ServiceAction, type ServiceRenderResult, type ShortcutItem } from "./services";
+export { buildServiceContent, buildShortcutItems, buildShortcutLine, canPerformServiceAction, describeServiceActionBlock, getServiceLabel, optimisticStatusForAction, type ServiceAction, type ServiceRenderResult, type ShortcutItem } from "./services";
 export { calculateActionModalLayout, formatActionModalInputValue, type ActionModalLayout } from "./action-modal";
 
 type UiMode = "modal" | "navigate" | "terminal";
@@ -191,6 +192,20 @@ export function buildEmbeddedTerminalExitMessage(liveSessionCount: number): stri
   return `Exit the UI and kill ${liveSessionCount} embedded terminal sessions?`;
 }
 
+export function buildQuitAndDownMessage(liveSessionCount: number): string {
+  const question = "Stop all services, shut the supervisor down and exit the UI?";
+
+  if (liveSessionCount === 0) {
+    return question;
+  }
+
+  if (liveSessionCount === 1) {
+    return `${question} 1 embedded terminal session will be killed.`;
+  }
+
+  return `${question} ${liveSessionCount} embedded terminal sessions will be killed.`;
+}
+
 export function getActiveEmbeddedTerminalSessionServices(
   sessions: ReadonlyMap<string, Pick<EmbeddedTerminalController, "isAlive">>,
 ): Set<string> {
@@ -242,7 +257,11 @@ function buildShortcutHelpContent(items: readonly ShortcutItem[]): string {
   return items.map((item) => item.label).join("\n");
 }
 
-function formatActionMessage(response: SupervisorResponse, fallback: string): FooterMessage {
+function formatActionMessage(
+  response: SupervisorResponse,
+  fallback: string,
+  resolveLabel: (serviceName: string) => string = (serviceName) => serviceName,
+): FooterMessage {
   if (!response.ok) {
     return { text: response.message ?? fallback, tone: "error" };
   }
@@ -250,12 +269,12 @@ function formatActionMessage(response: SupervisorResponse, fallback: string): Fo
   if (response.results?.length) {
     const failed = response.results.find((result) => !result.ok);
     if (failed) {
-      return { text: `${failed.service}: ${failed.message}`, tone: "error" };
+      return { text: `${resolveLabel(failed.service)}: ${failed.message}`, tone: "error" };
     }
 
     return {
       text: response.results.length === 1
-        ? `${response.results[0].service}: ${response.results[0].message}`
+        ? `${resolveLabel(response.results[0].service)}: ${response.results[0].message}`
         : response.message ?? `${response.results.length}/${response.results.length} actions completed.`,
       tone: "success",
     };
@@ -307,8 +326,13 @@ function buildServiceRenderKey(
   ].join("|");
 }
 
-export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
-  await new Promise<void>((resolve) => {
+export interface SupervisorTuiResult {
+  shutdownRequested: boolean;
+}
+
+export async function openSupervisorTui(config: ProjectConfig): Promise<SupervisorTuiResult> {
+  return new Promise<SupervisorTuiResult>((resolve) => {
+    let shutdownRequested = false;
     const initialPaneLayout = getSupervisorPaneLayout(process.stdout.columns ?? 120, process.stdout.rows ?? 32);
     const program = createTuiProgram();
     configureStableTuiMouseMode(program);
@@ -500,7 +524,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         return state ? "Select a service to manage it." : "Supervisor is not running.";
       }
 
-      const segments = [selected.service, selected.status];
+      const segments = [getServiceLabel(selected), selected.status];
       if (selected.isGit && selected.branch && selected.branch !== "-") {
         segments.push(selected.branch);
       }
@@ -660,7 +684,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
 
       const busyAction = pendingServiceActions.get(selected.service);
       if (busyAction) {
-        setFooterMessage("warning", `${selected.service} is busy with ${busyAction}. Wait until it finishes before ${actionLabel}.`);
+        setFooterMessage("warning", `${getServiceLabel(selected)} is busy with ${busyAction}. Wait until it finishes before ${actionLabel}.`);
         renderFooter();
         requestScreenRender(true);
         return false;
@@ -848,7 +872,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         : getDisplayLogContent(service, cached);
       const content = rawContent.replace(/^\n+/, "");
       const follow = logPinnedToBottom ? " follow" : " paused";
-      const label = ` Logs: ${service.service} / ${service.status}${follow} `;
+      const label = ` Logs: ${getServiceLabel(service)} / ${service.status}${follow} `;
       const renderedContent =
         content === "No logs yet." || content === "Loading logs..."
           ? centerInLogBox(content)
@@ -1201,6 +1225,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
             { label: "[Shift+S] Start all", priority: 3 },
             { label: "[Shift+K] Kill all", priority: 2 },
             { label: "[Shift+R] Restart all", priority: 1 },
+            { label: "[Shift+Q] Quit & down", priority: 0 },
           ]
           : [];
 
@@ -1246,11 +1271,11 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         confirmLabel: "Checkout",
         initialValue: "",
         inputLabel: "Branch",
-        message: `Switch ${selected.service} to another branch.`,
+        message: `Switch ${getServiceLabel(selected)} to another branch.`,
         onConfirm: (value) => {
           const targetBranch = value.trim();
           clearServiceLogCache(selected.service, selected.logPath);
-          setFooterMessage("info", `Running checkout for ${selected.service}...`);
+          setFooterMessage("info", `Running checkout for ${getServiceLabel(selected)}...`);
           renderFooter();
           requestScreenRender(true);
           void runServiceAction(selected.service, "checkout", async () => {
@@ -1263,7 +1288,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
             return response;
           }, `Checkout ${targetBranch} failed.`);
         },
-        title: `Branch: ${selected.service}`,
+        title: `Branch: ${getServiceLabel(selected)}`,
         validate: (value) => value.trim() ? null : "Branch name is required.",
       });
     };
@@ -1281,7 +1306,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       }
 
       if (!selected.isGit) {
-        setFooterMessage("warning", `${selected.service} is not a git repository.`);
+        setFooterMessage("warning", `${getServiceLabel(selected)} is not a git repository.`);
         void render();
         return;
       }
@@ -1295,10 +1320,10 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       openServiceActionModal({
         cancelMessage: "Pull cancelled.",
         confirmLabel: "Pull",
-        message: `Run git pull --rebase for ${selected.service}?`,
+        message: `Run git pull --rebase for ${getServiceLabel(selected)}?`,
         onConfirm: () => {
           clearServiceLogCache(selected.service, selected.logPath);
-          setFooterMessage("info", `Running git pull for ${selected.service}...`);
+          setFooterMessage("info", `Running git pull for ${getServiceLabel(selected)}...`);
           renderFooter();
           requestScreenRender(true);
           void runServiceAction(selected.service, "pull", async () => {
@@ -1309,9 +1334,9 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
               state.updatedAt = new Date().toISOString();
             }
             return response;
-          }, `Pull ${selected.service} failed.`);
+          }, `Pull ${getServiceLabel(selected)} failed.`);
         },
-        title: `Pull: ${selected.service}`,
+        title: `Pull: ${getServiceLabel(selected)}`,
       });
     };
 
@@ -1327,7 +1352,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       const result = launchExternalLogViewer(screen as unknown as LogViewerScreen, viewerCommand, servicesBox);
 
       if (result.error) {
-        setFooterMessage("error", `Unable to open logs for ${service.service}: ${getErrorMessage(result.error)}`);
+        setFooterMessage("error", `Unable to open logs for ${getServiceLabel(service)}: ${getErrorMessage(result.error)}`);
       }
 
       void render();
@@ -1362,7 +1387,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
           mode = "terminal";
           hideMainPanes();
           existingSession.show();
-          setFooterMessage("info", `Terminal resumed for ${service.service} in ${service.cwd}.`);
+          setFooterMessage("info", `Terminal resumed for ${getServiceLabel(service)} in ${service.cwd}.`);
           renderFooter();
           requestScreenRender(true);
           return;
@@ -1382,7 +1407,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         const session = openEmbeddedTerminal({
           cwd: service.cwd,
           screen,
-          serviceName: service.service,
+          serviceName: getServiceLabel(service),
           onEscapeInput: () => {
             lastTerminalEscapeAt = Date.now();
           },
@@ -1392,7 +1417,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
             }
             mode = "navigate";
             servicesBox.focus();
-            setFooterMessage("info", `Terminal hidden for ${service.service}. Press t to resume.`);
+            setFooterMessage("info", `Terminal hidden for ${getServiceLabel(service)}. Press t to resume.`);
             void render();
           },
         });
@@ -1402,13 +1427,13 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
         visibleEmbeddedTerminalService = null;
         setFooterMessage(
           "error",
-          `Unable to open terminal for ${service.service}: ${getErrorMessage(error)}`,
+          `Unable to open terminal for ${getServiceLabel(service)}: ${getErrorMessage(error)}`,
         );
         void render();
         return;
       }
 
-      setFooterMessage("info", `Terminal open for ${service.service} in ${service.cwd}.`);
+      setFooterMessage("info", `Terminal open for ${getServiceLabel(service)} in ${service.cwd}.`);
       renderFooter();
       requestScreenRender(true);
     };
@@ -1431,7 +1456,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
           });
         }
 
-        setFooterMessage("warning", `${service.service} has no active terminal session.`);
+        setFooterMessage("warning", `${getServiceLabel(service)} has no active terminal session.`);
         void render();
         return;
       }
@@ -1443,8 +1468,13 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       });
       mode = "navigate";
       servicesBox.focus();
-      setFooterMessage("success", `Killed terminal for ${service.service}.`);
+      setFooterMessage("success", `Killed terminal for ${getServiceLabel(service)}.`);
       void render();
+    };
+
+    const resolveServiceLabel = (serviceName: string): string => {
+      const service = state?.services[serviceName];
+      return service ? getServiceLabel(service) : serviceName;
     };
 
     const scrollLogs = (offset: number) => {
@@ -1456,7 +1486,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     const runAction = async (action: () => Promise<SupervisorResponse>, fallback: string) => {
       try {
         const response = await action();
-        const message = formatActionMessage(response, fallback);
+        const message = formatActionMessage(response, fallback, resolveServiceLabel);
         setFooterMessage(message.tone, message.text);
       } catch (error) {
         setFooterMessage("error", getErrorMessage(error));
@@ -1524,11 +1554,11 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
           cancelMessage: "Install cancelled.",
           confirmLabel: "Install",
           message: selected.status === "running"
-            ? `Install dependencies for ${selected.service}? The service will stop first and restart after success.`
-            : `Install dependencies for ${selected.service}?`,
+            ? `Install dependencies for ${getServiceLabel(selected)}? The service will stop first and restart after success.`
+            : `Install dependencies for ${getServiceLabel(selected)}?`,
           onConfirm: () => {
             clearServiceLogCache(selected.service, selected.logPath);
-            setFooterMessage("info", `Installing dependencies for ${selected.service}...`);
+            setFooterMessage("info", `Installing dependencies for ${getServiceLabel(selected)}...`);
             renderFooter();
             requestScreenRender(true);
             void runServiceAction(selected.service, action, async () => {
@@ -1545,21 +1575,21 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
                 renderFooter();
               }
               return response;
-            }, `Install ${selected.service} failed.`);
+            }, `Install ${getServiceLabel(selected)} failed.`);
           },
-          title: `Install: ${selected.service}`,
+          title: `Install: ${getServiceLabel(selected)}`,
         });
         return;
       }
 
       const prefix =
         action === "start"
-          ? `Start ${selected.service}`
+          ? `Start ${getServiceLabel(selected)}`
           : action === "restart"
-            ? `Restart ${selected.service}`
+            ? `Restart ${getServiceLabel(selected)}`
             : action === "clear-logs"
-              ? `Clear logs for ${selected.service}`
-              : `Kill ${selected.service}`;
+              ? `Clear logs for ${getServiceLabel(selected)}`
+              : `Kill ${getServiceLabel(selected)}`;
       if (action === "start" || action === "restart") {
         clearServiceLogCache(selected.service, selected.logPath);
       }
@@ -1670,7 +1700,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
       actionModal = null;
       destroyAllEmbeddedTerminalSessions({ notify: false, render: false });
       screen.destroy();
-      resolve();
+      resolve({ shutdownRequested });
     };
 
     const requestCloseScreen = () => {
@@ -1689,6 +1719,19 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
           closeScreen();
         },
         title: "Exit UI",
+      });
+    };
+
+    const requestQuitAndDown = () => {
+      openServiceActionModal({
+        cancelMessage: "Quit & down cancelled.",
+        confirmLabel: "Quit & down",
+        message: buildQuitAndDownMessage(getLiveEmbeddedTerminalCount()),
+        onConfirm: () => {
+          shutdownRequested = true;
+          closeScreen();
+        },
+        title: "Quit & down",
       });
     };
 
@@ -1801,6 +1844,11 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<void> {
     screen.key(["S-r"], () => {
       if (mode === "navigate") {
         restartAllServices();
+      }
+    });
+    screen.key(["S-q"], () => {
+      if (mode === "navigate") {
+        requestQuitAndDown();
       }
     });
     screen.key(["?"], () => {

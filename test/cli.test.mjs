@@ -281,6 +281,204 @@ test("loadProjectConfig resolves relative paths and defaults", async () => {
     config.services["api-main"].cwd,
     path.join(fixtureDir, "services/api"),
   );
+  assert.deepEqual(config.services["api-main"].ports, []);
+});
+
+test("loadProjectConfig normalizes a single port and a port list", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-ports-"));
+  await writeFile(
+    path.join(fixtureDir, ".devrc.yml"),
+    [
+      "project: amigo",
+      "groups:",
+      "  api:",
+      "    services: [api-main, api-gateway]",
+      "services:",
+      "  api-main:",
+      "    cwd: .",
+      "    command: yarn dev",
+      "    group: api",
+      "    port: 3021",
+      "  api-gateway:",
+      "    cwd: .",
+      "    command: yarn dev",
+      "    group: api",
+      "    port: [4021, 4022, 4021]",
+    ].join("\n"),
+  );
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+  const config = await loadProjectConfig("amigo", fixtureDir);
+
+  assert.deepEqual(config.services["api-main"].ports, [3021]);
+  assert.deepEqual(config.services["api-gateway"].ports, [4021, 4022]);
+});
+
+test("freePorts kills whatever is listening on the declared ports", async () => {
+  const { findPortListenerPids, freePorts } = await import(path.join(projectRoot, "dist/lib.js"));
+  const port = 45231;
+  const listener = execa("node", [
+    "-e",
+    `require("net").createServer().listen(${port}, () => setInterval(() => {}, 1000))`,
+  ]);
+  listener.catch(() => {});
+
+  await waitFor(async () => {
+    assert.deepEqual(await findPortListenerPids(port), [listener.pid]);
+  });
+
+  const freed = await freePorts([port, port]);
+
+  assert.deepEqual(freed, [{ pid: listener.pid, port }]);
+  assert.deepEqual(await findPortListenerPids(port), []);
+});
+
+test("freePorts is a no-op when nothing is listening", async () => {
+  const { freePorts } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  assert.deepEqual(await freePorts([]), []);
+  assert.deepEqual(await freePorts([45232]), []);
+});
+
+test("shutdown reports the stopped services and the ports it released", async () => {
+  const projectName = `dev-cli-shutdown-${Date.now()}`;
+  const port = 45233;
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-shutdown-"));
+  await writeFile(
+    path.join(fixtureDir, "service.js"),
+    ["process.on('SIGTERM', () => process.exit(0));", "setInterval(() => {}, 1000);"].join("\n"),
+  );
+  await writeFile(
+    path.join(fixtureDir, ".devrc.yml"),
+    [
+      `project: ${projectName}`,
+      "groups:",
+      "  api:",
+      "    services: [api]",
+      "services:",
+      "  api:",
+      "    cwd: .",
+      "    command: node ./service.js",
+      "    group: api",
+      `    port: ${port}`,
+    ].join("\n"),
+  );
+
+  const {
+    clearSupervisorFiles,
+    findPortListenerPids,
+    loadProjectConfig,
+    readSupervisorState,
+    SupervisorDaemon,
+    upSupervisor,
+  } = await import(path.join(projectRoot, "dist/lib.js"));
+  const config = await loadProjectConfig(projectName, fixtureDir);
+  const daemon = await SupervisorDaemon.create(projectName, fixtureDir);
+
+  let orphan;
+  try {
+    await daemon.start();
+    await waitFor(async () => {
+      const state = await readSupervisorState(projectName);
+      assert.ok(state);
+      await stat(state.socketPath);
+    });
+    await upSupervisor(config);
+
+    // An orphan outside the supervisor tree is exactly what `down` has to clean up.
+    orphan = execa("node", [
+      "-e",
+      `require("net").createServer().listen(${port}, () => setInterval(() => {}, 1000))`,
+    ]);
+    orphan.catch(() => {});
+    await waitFor(async () => {
+      assert.deepEqual(await findPortListenerPids(port), [orphan.pid]);
+    });
+
+    const results = await daemon.shutdown();
+
+    assert.deepEqual(
+      results.filter((result) => result.service === "api").map((result) => result.message),
+      ["Stopped", `Released port ${port} (PID ${orphan.pid})`],
+    );
+    assert.deepEqual(await findPortListenerPids(port), []);
+  } finally {
+    orphan?.kill("SIGKILL");
+    await daemon.shutdown().catch(() => {});
+    await clearSupervisorFiles(config.project);
+  }
+});
+
+test("services are listed by title and fall back to the service key", async () => {
+  const { buildServiceContent, describeServiceActionBlock, getServiceLabel } = await import(
+    path.join(projectRoot, "dist/lib.js")
+  );
+
+  const titled = {
+    branch: "main",
+    command: "node server.js",
+    cpuPercent: null,
+    cwd: "/tmp",
+    exitCode: null,
+    group: "api",
+    installCommand: "yarn",
+    isGit: true,
+    lastStartedAt: null,
+    lastStoppedAt: null,
+    logPath: "/tmp/checkout-api.log",
+    memoryBytes: null,
+    pid: null,
+    service: "checkout-api",
+    status: "stopped",
+    title: "Checkout API",
+  };
+  const untitled = { ...titled, logPath: "/tmp/ledger.log", service: "ledger", title: undefined };
+
+  assert.equal(getServiceLabel(titled), "Checkout API");
+  assert.equal(getServiceLabel(untitled), "ledger");
+
+  const render = buildServiceContent(
+    {
+      configPath: "/tmp/.devrc.yml",
+      groups: { api: ["checkout-api", "ledger"] },
+      pid: 1,
+      project: "amigo",
+      rootDir: "/tmp",
+      services: { "checkout-api": titled, ledger: untitled },
+      socketPath: "/tmp/dev.sock",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    "checkout-api",
+    120,
+  );
+
+  const text = stripBlessedTags(render.content);
+  assert.match(text, /Checkout API/);
+  assert.doesNotMatch(text, /checkout-api/);
+  assert.match(text, /ledger/);
+  // The service key stays the identifier used for selection and state lookups.
+  assert.deepEqual(render.serviceNames, ["checkout-api", "ledger"]);
+
+  assert.equal(
+    describeServiceActionBlock("restart", titled),
+    "Checkout API cannot restart from status stopped.",
+  );
+  assert.equal(
+    describeServiceActionBlock("restart", untitled),
+    "ledger cannot restart from status stopped.",
+  );
+});
+
+test("buildQuitAndDownMessage mentions embedded terminal sessions when they exist", async () => {
+  const { buildQuitAndDownMessage } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  assert.equal(
+    buildQuitAndDownMessage(0),
+    "Stop all services, shut the supervisor down and exit the UI?",
+  );
+  assert.match(buildQuitAndDownMessage(1), /1 embedded terminal session will be killed\.$/);
+  assert.match(buildQuitAndDownMessage(3), /3 embedded terminal sessions will be killed\.$/);
 });
 
 test("lib exports supervisor planning helpers", async () => {

@@ -26,5 +26,6 @@ export function createServiceState(
     cpuPercent: null,
     service: service.name,
     status: "stopped",
+    title: service.title,
   };
 }
