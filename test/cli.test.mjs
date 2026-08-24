@@ -314,6 +314,65 @@ test("loadProjectConfig normalizes a single port and a port list", async () => {
   assert.deepEqual(config.services["api-gateway"].ports, [4021, 4022]);
 });
 
+function minimalConfig(projectName) {
+  return [
+    `project: ${projectName}`,
+    "groups:",
+    "  api:",
+    "    services: [api-main]",
+    "services:",
+    "  api-main:",
+    "    cwd: .",
+    "    command: yarn dev",
+    "    group: api",
+  ].join("\n");
+}
+
+test("loadProjectConfig picks the project-suffixed file that declares the requested project", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-multi-config-"));
+  await writeFile(path.join(fixtureDir, ".devrc.alpha.yml"), minimalConfig("alpha"));
+  await writeFile(path.join(fixtureDir, ".devrc.beta.yml"), minimalConfig("beta"));
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+  const config = await loadProjectConfig("beta", fixtureDir);
+
+  assert.equal(config.project, "beta");
+  assert.equal(config.configPath, path.join(fixtureDir, ".devrc.beta.yml"));
+});
+
+test("loadProjectConfig fails listing available projects when none declares the requested one", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-multi-config-miss-"));
+  await writeFile(path.join(fixtureDir, ".devrc.alpha.yml"), minimalConfig("alpha"));
+  await writeFile(path.join(fixtureDir, ".devrc.yml"), minimalConfig("beta"));
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  await assert.rejects(
+    loadProjectConfig("gamma", fixtureDir),
+    /No config in .* declares project "gamma"\. Available projects: alpha, beta\./,
+  );
+});
+
+test("loadProjectConfig fails when the directory has no config file", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-no-config-"));
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  await assert.rejects(
+    loadProjectConfig("amigo", fixtureDir),
+    /No configuration file found in .*\. Expected .*\.devrc\.<project>\.yml/,
+  );
+});
+
+test("loadProjectConfig prefixes validation errors with the offending file name", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-invalid-config-"));
+  await writeFile(path.join(fixtureDir, ".devrc.broken.yml"), "project: 123\n");
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  await assert.rejects(loadProjectConfig("amigo", fixtureDir), /\.devrc\.broken\.yml:/);
+});
+
 test("freePorts kills whatever is listening on the declared ports", async () => {
   const { findPortListenerPids, freePorts } = await import(path.join(projectRoot, "dist/lib.js"));
   const port = 45231;

@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import YAML from "yaml";
 import { ZodError } from "zod";
 import { AppError } from "../../utils/errors";
@@ -14,6 +14,10 @@ import type {
 } from "./types";
 
 const CONFIG_FILES = [".devrc.yml", ".devrc.yaml"];
+
+// Also accepts project-suffixed files (.devrc.<name>.yml), so one directory can
+// host the configs of several projects and `dev up <project>` picks the right one.
+const CONFIG_FILE_PATTERN = /^\.devrc(\.[\w-]+)?\.ya?ml$/;
 
 function normalizeHookCommands(hooks: ProjectConfigInput["hooks"]): HooksConfig {
   const toArray = (value: string | string[] | undefined): string[] =>
@@ -113,9 +117,21 @@ export async function findConfigFile(cwd = process.cwd()): Promise<string> {
   );
 }
 
-export async function loadProjectConfig(projectName: string, cwd = process.cwd()): Promise<ProjectConfig> {
-  const configPath = await findConfigFile(cwd);
-  const rootDir = path.dirname(configPath);
+async function listConfigFiles(cwd: string): Promise<string[]> {
+  let entries;
+  try {
+    entries = await readdir(cwd, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  return entries
+    .filter((entry) => entry.isFile() && CONFIG_FILE_PATTERN.test(entry.name))
+    .map((entry) => path.join(cwd, entry.name))
+    .sort();
+}
+
+async function parseConfigFile(configPath: string): Promise<ProjectConfigInput> {
   const fileContents = await readFile(configPath, "utf8");
 
   let parsed: unknown;
@@ -129,16 +145,43 @@ export async function loadProjectConfig(projectName: string, cwd = process.cwd()
 
   const result = projectConfigSchema.safeParse(parsed);
   if (!result.success) {
-    throw new AppError(formatZodError(result.error));
+    throw new AppError(`${path.basename(configPath)}:\n${formatZodError(result.error)}`);
   }
 
-  const input = result.data;
+  return result.data;
+}
 
-  if (input.project !== projectName) {
+export async function loadProjectConfig(projectName: string, cwd = process.cwd()): Promise<ProjectConfig> {
+  const configFiles = await listConfigFiles(cwd);
+
+  if (configFiles.length === 0) {
     throw new AppError(
-      `Config project "${input.project}" does not match requested project "${projectName}".`,
+      `No configuration file found in ${cwd}. Expected ${CONFIG_FILES.join(", ")} or .devrc.<project>.yml.`,
     );
   }
+
+  let input: ProjectConfigInput | undefined;
+  let configPath = "";
+  const availableProjects: string[] = [];
+
+  for (const candidatePath of configFiles) {
+    const candidate = await parseConfigFile(candidatePath);
+    availableProjects.push(candidate.project);
+
+    if (candidate.project === projectName) {
+      input = candidate;
+      configPath = candidatePath;
+      break;
+    }
+  }
+
+  if (!input) {
+    throw new AppError(
+      `No config in ${cwd} declares project "${projectName}". Available projects: ${availableProjects.join(", ")}.`,
+    );
+  }
+
+  const rootDir = path.dirname(configPath);
 
   const groups: Record<string, GroupConfig> = Object.fromEntries(
     Object.entries(input.groups).map(([groupName, group]) => [
