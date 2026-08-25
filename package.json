@@ -18,7 +18,7 @@
     "test": "yarn build && node --test --test-force-exit test/*.test.mjs"
   },
   "engines": {
-    "node": ">=20.14.0"
+    "node": ">=24.19.0"
   },
   "dependencies": {
     "@xterm/headless": "^6.0.0",

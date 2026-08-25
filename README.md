@@ -16,7 +16,7 @@ It starts services through a detached supervisor process, keeps live state on di
 
 ## Requirements
 
-- Node.js `>= 20.14.0`
+- Node.js `>= 24.19.0`
 - A Unix-like environment is recommended
   Current process management relies on `ps` and POSIX signals.
 - `git` is only required for the branch-related UI actions (`pull` and `checkout`).
