@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { chmod, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { execa } from "execa";
 
 const projectRoot = process.cwd();
@@ -281,6 +281,430 @@ test("loadProjectConfig resolves relative paths and defaults", async () => {
     config.services["api-main"].cwd,
     path.join(fixtureDir, "services/api"),
   );
+  assert.deepEqual(config.services["api-main"].ports, []);
+});
+
+test("loadProjectConfig normalizes a single port and a port list", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-ports-"));
+  await writeFile(
+    path.join(fixtureDir, ".devrc.yml"),
+    [
+      "project: amigo",
+      "groups:",
+      "  api:",
+      "    services: [api-main, api-gateway]",
+      "services:",
+      "  api-main:",
+      "    cwd: .",
+      "    command: yarn dev",
+      "    group: api",
+      "    port: 3021",
+      "  api-gateway:",
+      "    cwd: .",
+      "    command: yarn dev",
+      "    group: api",
+      "    port: [4021, 4022, 4021]",
+    ].join("\n"),
+  );
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+  const config = await loadProjectConfig("amigo", fixtureDir);
+
+  assert.deepEqual(config.services["api-main"].ports, [3021]);
+  assert.deepEqual(config.services["api-gateway"].ports, [4021, 4022]);
+});
+
+function minimalConfig(projectName) {
+  return [
+    `project: ${projectName}`,
+    "groups:",
+    "  api:",
+    "    services: [api-main]",
+    "services:",
+    "  api-main:",
+    "    cwd: .",
+    "    command: yarn dev",
+    "    group: api",
+  ].join("\n");
+}
+
+test("loadProjectConfig picks the project-suffixed file that declares the requested project", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-multi-config-"));
+  await writeFile(path.join(fixtureDir, ".devrc.alpha.yml"), minimalConfig("alpha"));
+  await writeFile(path.join(fixtureDir, ".devrc.beta.yml"), minimalConfig("beta"));
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+  const config = await loadProjectConfig("beta", fixtureDir);
+
+  assert.equal(config.project, "beta");
+  assert.equal(config.configPath, path.join(fixtureDir, ".devrc.beta.yml"));
+});
+
+test("loadProjectConfig fails listing available projects when none declares the requested one", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-multi-config-miss-"));
+  await writeFile(path.join(fixtureDir, ".devrc.alpha.yml"), minimalConfig("alpha"));
+  await writeFile(path.join(fixtureDir, ".devrc.yml"), minimalConfig("beta"));
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  await assert.rejects(
+    loadProjectConfig("gamma", fixtureDir),
+    /No config in .* declares project "gamma"\. Available projects: alpha, beta\./,
+  );
+});
+
+test("loadProjectConfig fails when the directory has no config file", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-no-config-"));
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  await assert.rejects(
+    loadProjectConfig("amigo", fixtureDir),
+    /No configuration file found in .*\. Expected .*\.devrc\.<project>\.yml/,
+  );
+});
+
+test("loadProjectConfig accepts a config that is a symbolic link", async () => {
+  const sourceDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-symlink-source-"));
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-symlink-"));
+  const sourcePath = path.join(sourceDir, "shared.yml");
+  await writeFile(sourcePath, minimalConfig("amigo"));
+  await symlink(sourcePath, path.join(fixtureDir, ".devrc.yml"));
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+  const config = await loadProjectConfig("amigo", fixtureDir);
+
+  assert.equal(config.project, "amigo");
+  assert.equal(config.configPath, path.join(fixtureDir, ".devrc.yml"));
+});
+
+test("loadProjectConfig rejects the same port declared by two services", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-duplicate-port-"));
+  await writeFile(
+    path.join(fixtureDir, ".devrc.yml"),
+    [
+      "project: amigo",
+      "groups:",
+      "  api:",
+      "    services: [api-main, api-gateway]",
+      "services:",
+      "  api-main:",
+      "    cwd: .",
+      "    command: yarn dev",
+      "    group: api",
+      "    port: 3021",
+      "  api-gateway:",
+      "    cwd: .",
+      "    command: yarn dev",
+      "    group: api",
+      "    port: [4021, 3021]",
+    ].join("\n"),
+  );
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  await assert.rejects(
+    loadProjectConfig("amigo", fixtureDir),
+    /Services "api-main" and "api-gateway" both declare port 3021\./,
+  );
+});
+
+test("loadProjectConfig prefixes validation errors with the offending file name", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-invalid-config-"));
+  await writeFile(path.join(fixtureDir, ".devrc.broken.yml"), "project: 123\n");
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  await assert.rejects(loadProjectConfig("amigo", fixtureDir), /\.devrc\.broken\.yml:/);
+});
+
+test("freePorts kills whatever is listening on the declared ports", async () => {
+  const { findPortListenerPids, freePorts } = await import(path.join(projectRoot, "dist/lib.js"));
+  const port = 45231;
+  const listener = execa("node", [
+    "-e",
+    `require("net").createServer().listen(${port}, () => setInterval(() => {}, 1000))`,
+  ]);
+  listener.catch(() => {});
+
+  await waitFor(async () => {
+    assert.deepEqual(await findPortListenerPids(port), [listener.pid]);
+  });
+
+  const freed = await freePorts([port, port]);
+
+  assert.deepEqual(freed, [{ pid: listener.pid, port }]);
+  assert.deepEqual(await findPortListenerPids(port), []);
+});
+
+test("freePorts is a no-op when nothing is listening", async () => {
+  const { freePorts } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  assert.deepEqual(await freePorts([]), []);
+  assert.deepEqual(await freePorts([45232]), []);
+});
+
+test("shutdown reports the stopped services and the ports it released", async () => {
+  const projectName = `dev-cli-shutdown-${Date.now()}`;
+  const port = 45233;
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-shutdown-"));
+  await writeFile(
+    path.join(fixtureDir, "service.js"),
+    ["process.on('SIGTERM', () => process.exit(0));", "setInterval(() => {}, 1000);"].join("\n"),
+  );
+  await writeFile(
+    path.join(fixtureDir, ".devrc.yml"),
+    [
+      `project: ${projectName}`,
+      "groups:",
+      "  api:",
+      "    services: [api]",
+      "services:",
+      "  api:",
+      "    cwd: .",
+      "    command: node ./service.js",
+      "    group: api",
+      `    port: ${port}`,
+    ].join("\n"),
+  );
+
+  const {
+    clearSupervisorFiles,
+    findPortListenerPids,
+    loadProjectConfig,
+    readSupervisorState,
+    SupervisorDaemon,
+    upSupervisor,
+  } = await import(path.join(projectRoot, "dist/lib.js"));
+  const config = await loadProjectConfig(projectName, fixtureDir);
+  const daemon = await SupervisorDaemon.create(projectName, fixtureDir);
+
+  let orphan;
+  try {
+    await daemon.start();
+    await waitFor(async () => {
+      const state = await readSupervisorState(projectName);
+      assert.ok(state);
+      await stat(state.socketPath);
+    });
+    await upSupervisor(config);
+
+    // An orphan outside the supervisor tree is exactly what `down` has to clean up.
+    orphan = execa("node", [
+      "-e",
+      `require("net").createServer().listen(${port}, () => setInterval(() => {}, 1000))`,
+    ]);
+    orphan.catch(() => {});
+    await waitFor(async () => {
+      assert.deepEqual(await findPortListenerPids(port), [orphan.pid]);
+    });
+
+    const results = await daemon.shutdown();
+
+    assert.deepEqual(
+      results.filter((result) => result.service === "api").map((result) => result.message),
+      ["Stopped", `Released port ${port} (PID ${orphan.pid})`],
+    );
+    assert.deepEqual(await findPortListenerPids(port), []);
+  } finally {
+    orphan?.kill("SIGKILL");
+    await daemon.shutdown().catch(() => {});
+    await clearSupervisorFiles(config.project);
+  }
+});
+
+test("the shutdown response fails when a service does not stop", async () => {
+  const { buildShutdownResponse } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  const stopped = { message: "Stopped", ok: true, service: "api" };
+  const released = { message: "Released port 3009 (PID 991)", ok: true, service: "api" };
+  const stuck = { message: "Failed to stop cleanly", ok: false, service: "worker" };
+
+  const clean = buildShutdownResponse("req-1", [stopped, released]);
+  assert.equal(clean.ok, true);
+  assert.equal(clean.message, "Supervisor stopped.");
+  assert.deepEqual(clean.results, [stopped, released]);
+
+  // A service still alive must not be reported as a clean shutdown.
+  const failed = buildShutdownResponse("req-2", [stopped, stuck, released]);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.message, "Supervisor stopped, but 1 of 3 steps failed.");
+  assert.deepEqual(failed.results, [stopped, stuck, released]);
+});
+
+test("down prints the service title instead of the service key", async () => {
+  const projectName = `dev-cli-down-title-${Date.now()}`;
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-down-title-"));
+  await writeFile(
+    path.join(fixtureDir, "service.js"),
+    ["process.on('SIGTERM', () => process.exit(0));", "setInterval(() => {}, 1000);"].join("\n"),
+  );
+  await writeFile(
+    path.join(fixtureDir, ".devrc.yml"),
+    [
+      `project: ${projectName}`,
+      "groups:",
+      "  api:",
+      "    services: [api]",
+      "services:",
+      "  api:",
+      "    cwd: .",
+      "    command: node ./service.js",
+      "    group: api",
+      "    title: Main API",
+    ].join("\n"),
+  );
+
+  const env = { ...process.env, TEMP: "/tmp", TMP: "/tmp", TMPDIR: "/tmp" };
+
+  try {
+    await execa("node", [cliEntry, "up", projectName, "--no-ui"], { cwd: fixtureDir, env });
+
+    const downResult = await execa("node", [cliEntry, "down", projectName], { cwd: fixtureDir, env });
+    const stdout = stripAnsi(downResult.stdout);
+
+    assert.equal(downResult.exitCode, 0);
+    assert.match(stdout, /Main API: Stopped/);
+    assert.doesNotMatch(stdout, /^\s*.\s*api:/mu);
+    assert.match(stdout, new RegExp(`${projectName}: stopped\\.`));
+  } finally {
+    await execa("node", [cliEntry, "down", projectName], { cwd: fixtureDir, env, reject: false });
+  }
+});
+
+test("down warns when there is no active session", async () => {
+  const projectName = `dev-cli-down-idle-${Date.now()}`;
+  const fixtureDir = await createSupervisorFixture(projectName);
+
+  const result = await execa("node", [cliEntry, "down", projectName], {
+    cwd: fixtureDir,
+    env: { ...process.env, TEMP: "/tmp", TMP: "/tmp", TMPDIR: "/tmp" },
+  });
+  const stdout = stripAnsi(result.stdout);
+
+  assert.equal(result.exitCode, 0);
+  assert.match(stdout, new RegExp(`${projectName}: no active session to stop\\.`));
+  assert.doesNotMatch(stdout, /stopped\./);
+});
+
+test("services are listed by title and fall back to the service key", async () => {
+  const { buildServiceContent, describeServiceActionBlock, getServiceLabel } = await import(
+    path.join(projectRoot, "dist/lib.js")
+  );
+
+  const titled = {
+    branch: "main",
+    command: "node server.js",
+    cpuPercent: null,
+    cwd: "/tmp",
+    exitCode: null,
+    group: "api",
+    installCommand: "yarn",
+    isGit: true,
+    lastStartedAt: null,
+    lastStoppedAt: null,
+    logPath: "/tmp/checkout-api.log",
+    memoryBytes: null,
+    pid: null,
+    service: "checkout-api",
+    status: "stopped",
+    title: "Checkout API",
+  };
+  const untitled = { ...titled, logPath: "/tmp/ledger.log", service: "ledger", title: undefined };
+
+  assert.equal(getServiceLabel(titled), "Checkout API");
+  assert.equal(getServiceLabel(untitled), "ledger");
+
+  const render = buildServiceContent(
+    {
+      configPath: "/tmp/.devrc.yml",
+      groups: { api: ["checkout-api", "ledger"] },
+      pid: 1,
+      project: "amigo",
+      rootDir: "/tmp",
+      services: { "checkout-api": titled, ledger: untitled },
+      socketPath: "/tmp/dev.sock",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    "checkout-api",
+    120,
+  );
+
+  const text = stripBlessedTags(render.content);
+  assert.match(text, /Checkout API/);
+  assert.doesNotMatch(text, /checkout-api/);
+  assert.match(text, /ledger/);
+  // The service key stays the identifier used for selection and state lookups.
+  assert.deepEqual(render.serviceNames, ["checkout-api", "ledger"]);
+
+  assert.equal(
+    describeServiceActionBlock("restart", titled),
+    "Checkout API cannot restart from status stopped.",
+  );
+  assert.equal(
+    describeServiceActionBlock("restart", untitled),
+    "ledger cannot restart from status stopped.",
+  );
+});
+
+test("the services table shows a PORT column on wide screens", async () => {
+  const { buildServiceContent } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  const withPorts = {
+    branch: "main",
+    command: "node server.js",
+    cpuPercent: null,
+    cwd: "/tmp",
+    exitCode: null,
+    group: "api",
+    installCommand: "yarn",
+    isGit: true,
+    lastStartedAt: null,
+    lastStoppedAt: null,
+    logPath: "/tmp/checkout-api.log",
+    memoryBytes: null,
+    pid: null,
+    ports: [3009, 5173],
+    service: "checkout-api",
+    status: "stopped",
+    title: "Checkout API",
+  };
+  // State written before `ports` existed: an already running supervisor keeps rendering.
+  const legacy = { ...withPorts, logPath: "/tmp/ledger.log", ports: undefined, service: "ledger", title: "Ledger" };
+
+  const state = {
+    configPath: "/tmp/.devrc.yml",
+    groups: { api: ["checkout-api", "ledger"] },
+    pid: 1,
+    project: "amigo",
+    rootDir: "/tmp",
+    services: { "checkout-api": withPorts, ledger: legacy },
+    socketPath: "/tmp/dev.sock",
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const wide = stripBlessedTags(buildServiceContent(state, "checkout-api", 140).headerContent);
+  assert.match(wide, /PORT/);
+
+  const rows = stripBlessedTags(buildServiceContent(state, "checkout-api", 140).content).split("\n");
+  assert.match(rows[0], /3009,5173/);
+  assert.match(rows[1], /--/);
+
+  const narrow = stripBlessedTags(buildServiceContent(state, "checkout-api", 100).headerContent);
+  assert.doesNotMatch(narrow, /PORT/);
+});
+
+test("buildQuitAndDownMessage mentions embedded terminal sessions when they exist", async () => {
+  const { buildQuitAndDownMessage } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  assert.equal(
+    buildQuitAndDownMessage(0),
+    "Stop all services, shut the supervisor down and exit the UI?",
+  );
+  assert.match(buildQuitAndDownMessage(1), /1 embedded terminal session will be killed\.$/);
+  assert.match(buildQuitAndDownMessage(3), /3 embedded terminal sessions will be killed\.$/);
 });
 
 test("lib exports supervisor planning helpers", async () => {

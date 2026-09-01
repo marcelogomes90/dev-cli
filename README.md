@@ -16,7 +16,7 @@ It starts services through a detached supervisor process, keeps live state on di
 
 ## Requirements
 
-- Node.js `>= 20.14.0`
+- Node.js `>= 24.19.0`
 - A Unix-like environment is recommended
   Current process management relies on `ps` and POSIX signals.
 - `git` is only required for the branch-related UI actions (`pull` and `checkout`).
@@ -58,7 +58,8 @@ The wizard asks for the project name, groups, services, startup options, and ser
 
 ## Configuration
 
-Create a `.devrc.yml` or `.devrc.yaml` in the workspace root:
+Create a `.devrc.yml` or `.devrc.yaml` in the workspace root (or `.devrc.<project>.yml` when the
+same directory holds more than one project):
 
 ```yaml
 project: amigo-workspace
@@ -85,10 +86,12 @@ services:
     group: infra
 
   api:
+    title: Main API
     cwd: ./api
     command: nvm use && yarn start:dev
     installCommand: yarn
     group: api
+    port: 3000
     dependsOn: [redis]
     env:
       NODE_ENV: development
@@ -108,27 +111,43 @@ services:
 
 #### Service fields
 
+- `title`: optional display name used by the UI and by `dev status`. Defaults to the service key.
+  The key stays the identifier for `--only`, logs, and every command.
 - `cwd`: working directory for the service command.
 - `command`: command used to run the service.
 - `installCommand`: optional command used by the UI install action.
 - `group`: group name the service belongs to.
 - `autostart`: optional boolean, defaults to `true`.
+- `port`: optional port, or list of ports, owned by the service.
 - `env`: optional environment variables merged into the child process.
 - `dependsOn`: optional list of service names required for the initial `up` plan.
 
 ### Notes
 
-- Config files are discovered only in the current workspace root as `.devrc.yml` or `.devrc.yaml`.
+- Config files are discovered only in the current workspace root, as `.devrc.yml`, `.devrc.yaml` or
+  `.devrc.<project>.yml` / `.devrc.<project>.yaml`. Symbolic links pointing at a config file work too.
+- The suffixed form lets one directory hold several projects. `dev up <project>` reads the
+  candidates in alphabetical order and uses the first whose `project` field matches the argument,
+  so the suffix is only a filename convention: the `project` field is what selects the config.
 - `project` in the config must match the `<project>` argument passed to the CLI.
 - Relative `cwd` values are resolved from the directory that contains the config file.
 - `~/` and absolute `cwd` values are supported.
 - Every service must belong to an existing group and must be listed in that group's `services` array.
 - `dependsOn` is only used during `dev up`.
 - `dev up` starts services in dependency phases.
+- Stop and restart also work phase by phase (stop walks them in reverse), and every service inside
+  the same phase is handled concurrently.
 - After one dependency phase is started, the next dependent phase waits 5 seconds before starting.
 - Services in the same dependency phase start together after that shared delay.
 - `--only` accepts group names or service names.
 - Group `layout` metadata is still accepted in the config for compatibility, but the built-in UI does not currently use it.
+- Declared ports are released before a service starts and after `down` finishes: whatever is
+  listening on them is sent `SIGTERM`, then `SIGKILL` if it survives 2 seconds. This clears orphan
+  watchers that outlive the supervisor, so it also kills unrelated processes bound to those ports.
+- Only ports declared with `port` are ever touched. Leave it out for services managed by Docker.
+- Two services cannot declare the same port. The config is rejected, because a shared port would
+  make one service kill the other when a dependency phase starts them together.
+- Declared ports are shown in the UI `PORT` column on terminals wide enough for it.
 - Hooks run in the workspace root using the current shell environment.
 - Service commands and install commands run through the current shell from each service `cwd`.
 
@@ -192,6 +211,19 @@ Behavior:
 
 - Runs the `beforeDown` hook before shutdown.
 - Stops every managed service and removes the active supervisor state.
+- Releases every port declared with `port` after the managed services exit.
+- Prints one line per service stopped and per port released, then the final summary:
+
+```text
+amigo-workspace: stopping services and releasing ports...
+  ✓ Main API: Stopped
+  ✓ Redis: Already stopped
+  ✓ Main API: Released port 3000 (PID 4821)
+amigo-workspace: stopped.
+```
+
+- A port line only shows up when something outside the supervisor tree was still holding the port.
+- With no active session, it prints `no active session to stop.` and exits without doing anything.
 
 ### `dev init`
 
@@ -210,7 +242,7 @@ Behavior:
 
 The built-in UI lets you manage services individually after the supervisor is running.
 
-The header shows the project name, running service count, and live CPU/RAM usage. The service list shows the current git branch for service directories that are git repositories, plus per-service memory and CPU usage when the terminal is wide enough. On wider terminals, the table also shows a `TERM` column when a service has an active embedded terminal session.
+The header shows the project name, running service count, and live CPU/RAM usage. Services are listed by their `title` when one is configured, falling back to the service key. The service list shows the current git branch for service directories that are git repositories, plus per-service memory and CPU usage when the terminal is wide enough. On wider terminals, the table also shows a `TERM` column when a service has an active embedded terminal session.
 
 ### Navigation
 
@@ -218,6 +250,7 @@ The header shows the project name, running service count, and live CPU/RAM usage
 - `PageUp` / `PageDown`: scroll logs
 - `Home` / `End`: jump to top or bottom of the visible log pane
 - `q` or `Esc`: exit the UI
+- `Shift+Q`: exit the UI and stop the whole environment
 
 ### Actions
 
@@ -233,6 +266,9 @@ The header shows the project name, running service count, and live CPU/RAM usage
 - `Shift+S`: start all services
 - `Shift+K`: kill all services (asks for confirmation)
 - `Shift+R`: restart all services (asks for confirmation)
+- `Shift+Q`: quit and down — asks for confirmation, then closes the UI and shuts the supervisor
+  down, with the same effect as `dev down <project>` (`beforeDown` hook, port release, and the
+  per-service shutdown lines printed in the terminal after the UI closes)
 - `?`: open a shortcut help modal with the full list of available keys
 - `Esc` inside the embedded terminal: hide it and return to the UI; press `t` again to resume the same session for that service
 

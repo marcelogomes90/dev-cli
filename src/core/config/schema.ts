@@ -2,12 +2,16 @@ import { z } from "zod";
 
 const hookValueSchema = z.union([z.string(), z.array(z.string())]).optional();
 
+const portNumberSchema = z.number().int().min(1).max(65535);
+
 export const serviceSchema = z.object({
+  title: z.string().min(1).optional(),
   cwd: z.string().min(1),
   command: z.string().min(1),
   installCommand: z.string().min(1).optional(),
   group: z.string().min(1),
   autostart: z.boolean().optional(),
+  port: z.union([portNumberSchema, z.array(portNumberSchema)]).optional(),
   env: z.record(z.string(), z.string()).optional(),
   dependsOn: z.array(z.string().min(1)).optional(),
 });

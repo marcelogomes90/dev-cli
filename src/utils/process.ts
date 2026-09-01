@@ -1,5 +1,7 @@
 import { execa } from "execa";
 
+const PORT_RELEASE_TIMEOUT_MS = 2_000;
+
 export function isProcessAlive(pid: number | null | undefined): boolean {
   if (!pid) {
     return false;
@@ -26,10 +28,15 @@ export function killProcess(pid: number | null | undefined, signal: NodeJS.Signa
   }
 }
 
+/**
+ * `process.kill(pid, 0)` is a cheap syscall, so polling tightly costs almost nothing and cuts
+ * the tail latency of every stop: a service that dies in 5ms used to keep the caller waiting
+ * for the rest of the poll window.
+ */
 export async function waitForProcessExit(
   pid: number | null | undefined,
   timeoutMs: number,
-  pollMs = 100,
+  pollMs = 25,
 ): Promise<boolean> {
   if (!pid || !isProcessAlive(pid)) {
     return true;
@@ -44,6 +51,65 @@ export async function waitForProcessExit(
   }
 
   return !isProcessAlive(pid);
+}
+
+export async function findPortListenerPids(port: number): Promise<number[]> {
+  let stdout: string;
+
+  try {
+    /**
+     * `lsof` exits with code 1 when nothing is listening, so failures are expected here.
+     * `-sTCP:LISTEN` keeps clients connected to the port from being reported as owners.
+     */
+    const result = await execa("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], { reject: false });
+    stdout = result.stdout;
+  } catch {
+    return [];
+  }
+
+  const pids: number[] = [];
+  for (const line of stdout.split("\n")) {
+    const pid = Number.parseInt(line.trim(), 10);
+    if (Number.isFinite(pid) && pid > 0 && pid !== process.pid) {
+      pids.push(pid);
+    }
+  }
+
+  return pids;
+}
+
+export interface FreedPort {
+  pid: number;
+  port: number;
+}
+
+export async function freePorts(ports: number[]): Promise<FreedPort[]> {
+  const uniquePorts = [...new Set(ports)];
+  if (uniquePorts.length === 0) {
+    return [];
+  }
+
+  const perPort = await Promise.all(
+    uniquePorts.map(async (port) => {
+      const freed: FreedPort[] = [];
+
+      for (const pid of await findPortListenerPids(port)) {
+        if (!killProcess(pid, "SIGTERM")) {
+          continue;
+        }
+
+        if (!(await waitForProcessExit(pid, PORT_RELEASE_TIMEOUT_MS))) {
+          killProcess(pid, "SIGKILL");
+        }
+
+        freed.push({ pid, port });
+      }
+
+      return freed;
+    }),
+  );
+
+  return perPort.flat();
 }
 
 export async function getProcessTree(rootPid: number | null | undefined): Promise<number[]> {
@@ -81,12 +147,15 @@ export async function getProcessTree(rootPid: number | null | undefined): Promis
   return ordered;
 }
 
+export function killProcessTree(tree: readonly number[], signal: NodeJS.Signals): void {
+  for (const pid of tree) {
+    killProcess(pid, signal);
+  }
+}
+
 export async function terminateProcessTree(
   rootPid: number | null | undefined,
   signal: NodeJS.Signals,
 ): Promise<void> {
-  const tree = await getProcessTree(rootPid);
-  for (const pid of tree) {
-    killProcess(pid, signal);
-  }
+  killProcessTree(await getProcessTree(rootPid), signal);
 }

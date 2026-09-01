@@ -1,8 +1,8 @@
 import { Command } from "commander";
-import { loadConfigFromArg, wrapCommand } from "./helpers";
+import { loadConfigFromArg, stopProject, wrapCommand } from "./helpers";
 import { parseCsvOption } from "../utils/command";
 import { isSupervisorRunning, triggerUpSupervisor, upSupervisor } from "../core/supervisor";
-import { formatSupervisorResponseSummary, printInfo, printSuccess, printWarning } from "../ui/output";
+import { createServiceLabelResolver, formatSupervisorResponseSummary, printInfo, printSuccess, printWarning } from "../ui/output";
 import { openSupervisorTui } from "../ui/tui";
 
 export function registerUpCommand(program: Command): void {
@@ -25,7 +25,10 @@ export function registerUpCommand(program: Command): void {
         if (options.ui !== false) {
           printInfo(`${config.project}: starting services and opening UI.`);
           await triggerUpSupervisor(config, targets);
-          await openSupervisorTui(config);
+          const result = await openSupervisorTui(config);
+          if (result.shutdownRequested) {
+            await stopProject(config);
+          }
           return;
         }
 
@@ -34,7 +37,14 @@ export function registerUpCommand(program: Command): void {
           throw new Error(response.message ?? "Unable to start supervisor.");
         }
 
-        printSuccess(formatSupervisorResponseSummary(config.project, "services started", response));
+        printSuccess(
+          formatSupervisorResponseSummary(
+            config.project,
+            "services started",
+            response,
+            createServiceLabelResolver(config),
+          ),
+        );
       }),
     );
 }

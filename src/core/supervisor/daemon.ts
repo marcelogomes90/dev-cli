@@ -9,12 +9,15 @@ import {
   GitActionError,
   isGitRepository,
   pullBranchRebaseWithOutput,
+  readGitBranchStatus,
   type GitActionResult,
 } from "../git";
 import { AppError, getErrorMessage } from "../../utils/errors";
 import {
+  freePorts,
+  getProcessTree,
   isProcessAlive,
-  terminateProcessTree,
+  killProcessTree,
   waitForProcessExit,
 } from "../../utils/process";
 import { buildSupervisorPlan, DEPENDENCY_START_DELAY_MS, resolveTargets, type SupervisorPlan } from "./plan";
@@ -22,7 +25,7 @@ import { clearSupervisorFiles, ensureSupervisorDirs, getSupervisorPaths } from "
 import { readProcessTreeResourceMetrics, type ProcessResourceSample } from "./process-metrics";
 import { sanitizeLogChunk } from "./log-sanitizer";
 import { buildShellSpawn, resolveRuntimeShell } from "./runtime";
-import { createServiceState } from "./service-state";
+import { createServiceState, getServiceLabel } from "./service-state";
 import { loadSupervisorState, saveSupervisorState } from "./state";
 import type {
   ManagedServiceState,
@@ -80,6 +83,26 @@ function setResourceMetrics(
   entry.cpuPercent = cpuPercent;
   entry.memoryBytes = nextMemoryBytes;
   return true;
+}
+
+/**
+ * A service that survives SIGKILL keeps its process alive after `down`, so the response has to
+ * fail instead of reporting a clean stop.
+ */
+export function buildShutdownResponse(
+  id: string,
+  results: SupervisorServiceResult[],
+): SupervisorResponse {
+  const failed = results.filter((result) => !result.ok);
+
+  return {
+    id,
+    message: failed.length > 0
+      ? `Supervisor stopped, but ${failed.length} of ${results.length} steps failed.`
+      : "Supervisor stopped.",
+    ok: failed.length === 0,
+    results,
+  };
 }
 
 export class SupervisorDaemon {
@@ -295,11 +318,40 @@ export class SupervisorDaemon {
         };
       }
       case "shutdown":
-        await this.shutdown();
-        return { id: request.id, ok: true, message: "Supervisor stopped." };
+        return buildShutdownResponse(request.id, await this.shutdown());
       default:
         return { id: request.id, ok: false, message: `Unsupported request type "${request.type}".` };
     }
+  }
+
+  /**
+   * One git process per service, all of them in flight at once. Reading them in sequence made
+   * the refresh tick cost the sum of every repository probe, and commands that wait on the
+   * refresh paid that whole bill.
+   */
+  private async refreshBranches(): Promise<boolean> {
+    const serviceNames = Object.keys(this.config.services);
+    const statuses = await Promise.all(
+      serviceNames.map((serviceName) => readGitBranchStatus(this.config.services[serviceName].cwd)),
+    );
+
+    let dirty = false;
+    for (const [index, serviceName] of serviceNames.entries()) {
+      const entry = this.state.services[serviceName];
+      const { branch, isGit } = statuses[index];
+
+      if (entry.isGit !== isGit) {
+        entry.isGit = isGit;
+        dirty = true;
+      }
+
+      if (entry.branch !== branch) {
+        entry.branch = branch;
+        dirty = true;
+      }
+    }
+
+    return dirty;
   }
 
   private async refreshDerivedState(forceBranchRefresh = false): Promise<void> {
@@ -316,7 +368,7 @@ export class SupervisorDaemon {
       const resourcePidsByService = new Map<string, number>();
       let dirty = false;
 
-      for (const [serviceName, service] of Object.entries(this.config.services)) {
+      for (const serviceName of Object.keys(this.config.services)) {
         const entry = this.state.services[serviceName];
         if (
           RESOURCE_METRIC_STATUSES.has(entry.status) &&
@@ -334,20 +386,10 @@ export class SupervisorDaemon {
         } else {
           dirty = setResourceMetrics(entry, null, null) || dirty;
         }
+      }
 
-        if (shouldRefreshBranches) {
-          const nextIsGit = await isGitRepository(service.cwd);
-          if (entry.isGit !== nextIsGit) {
-            entry.isGit = nextIsGit;
-            dirty = true;
-          }
-
-          const nextBranch = nextIsGit ? await getCurrentBranch(service.cwd).catch(() => "-") : "-";
-          if (entry.branch !== nextBranch) {
-            entry.branch = nextBranch;
-            dirty = true;
-          }
-        }
+      if (shouldRefreshBranches) {
+        dirty = (await this.refreshBranches()) || dirty;
       }
 
       if (resourcePidsByService.size > 0) {
@@ -420,7 +462,7 @@ export class SupervisorDaemon {
     return {
       service: serviceName,
       ok: false,
-      message: `${serviceName} is not a git repository.`,
+      message: `${getServiceLabel(entry)} is not a git repository.`,
     };
   }
 
@@ -661,6 +703,32 @@ export class SupervisorDaemon {
     await writeFile(this.state.services[serviceName].logPath, "");
   }
 
+  /**
+   * A crashed watcher (nodemon, vite, `--inspect`) often survives outside the supervisor's
+   * process tree and keeps holding the port, so the service would start broken. Only ports
+   * declared in the config are touched.
+   */
+  private async releaseServicePorts(serviceName: string): Promise<SupervisorServiceResult[]> {
+    const ports = this.config.services[serviceName]?.ports ?? [];
+    if (ports.length === 0) {
+      return [];
+    }
+
+    const freed = await freePorts(ports);
+    const results: SupervisorServiceResult[] = [];
+
+    for (const { pid, port } of freed) {
+      await this.appendSupervisorLog(serviceName, `Port ${port} was in use by PID ${pid}; killed it.`);
+      results.push({
+        service: serviceName,
+        ok: true,
+        message: `Released port ${port} (PID ${pid})`,
+      });
+    }
+
+    return results;
+  }
+
   private async startService(
     serviceName: string,
     options: { preserveLog?: boolean } = {},
@@ -682,6 +750,8 @@ export class SupervisorDaemon {
     if (!options.preserveLog) {
       await this.clearServiceLogFile(serviceName);
     }
+
+    await this.releaseServicePorts(serviceName);
 
     const managed = this.spawnServiceProcess(serviceName);
     entry.pid = managed.child.pid ?? null;
@@ -887,11 +957,16 @@ export class SupervisorDaemon {
       this.expectedStops.add(managed);
     }
 
-    await terminateProcessTree(pid, "SIGTERM");
+    /**
+     * The tree is read once and reused for the escalation: `getProcessTree` shells out to a
+     * full `ps` listing, and the tree can only shrink between SIGTERM and SIGKILL.
+     */
+    const tree = await getProcessTree(pid);
+    killProcessTree(tree, "SIGTERM");
     const gracefulExit = await waitForProcessExit(pid, DEFAULT_STOP_TIMEOUT_MS);
 
     if (!gracefulExit && isProcessAlive(pid)) {
-      await terminateProcessTree(pid, "SIGKILL");
+      killProcessTree(tree, "SIGKILL");
       await waitForProcessExit(pid, DEFAULT_KILL_TIMEOUT_MS);
     }
 
@@ -967,13 +1042,9 @@ export class SupervisorDaemon {
 
         if (phaseIndex > 0) {
           await sleep(DEPENDENCY_START_DELAY_MS);
-          results.push(...(await Promise.all(phase.map((serviceName) => this.startService(serviceName)))));
-          continue;
         }
 
-        for (const serviceName of phase) {
-          results.push(await this.startService(serviceName));
-        }
+        results.push(...(await Promise.all(phase.map((serviceName) => this.startService(serviceName)))));
       }
     }
 
@@ -985,15 +1056,24 @@ export class SupervisorDaemon {
     return results;
   }
 
+  /**
+   * Services inside a dependency phase have no ordering between them, so they are stopped
+   * together: stopping them one by one made every service pay the previous one's shutdown
+   * grace period, and the whole batch cost the sum of all timeouts.
+   */
   private async stopTargets(targets?: string[]): Promise<SupervisorServiceResult[]> {
-    const { orderedServices } = await this.resolvePlanTargets(targets, false);
+    const { startupPhases } = await this.resolvePlanTargets(targets, false);
     const results: SupervisorServiceResult[] = [];
 
-    for (const serviceName of [...orderedServices].reverse()) {
-      results.push(await this.stopService(serviceName));
+    for (const phase of [...startupPhases].reverse()) {
+      if (!phase?.length) {
+        continue;
+      }
+
+      results.push(...(await Promise.all(phase.map((serviceName) => this.stopService(serviceName)))));
     }
 
-    await this.refreshDerivedState(true);
+    await this.refreshDerivedState();
     return results;
   }
 
@@ -1005,36 +1085,35 @@ export class SupervisorDaemon {
       results.push(await this.installService(serviceName));
     }
 
-    await this.refreshDerivedState(true);
+    await this.refreshDerivedState();
     return results;
   }
 
   private async restartTargets(targets?: string[]): Promise<SupervisorServiceResult[]> {
-    const { orderedServices } = await this.resolvePlanTargets(targets, false);
+    const { startupPhases } = await this.resolvePlanTargets(targets, false);
     const results: SupervisorServiceResult[] = [];
 
-    for (const serviceName of orderedServices) {
-      results.push(await this.restartService(serviceName));
+    for (const phase of startupPhases) {
+      if (!phase?.length) {
+        continue;
+      }
+
+      results.push(...(await Promise.all(phase.map((serviceName) => this.restartService(serviceName)))));
     }
 
-    await this.refreshDerivedState(true);
+    await this.refreshDerivedState();
     return results;
   }
 
   private async clearLogsTargets(targets?: string[]): Promise<SupervisorServiceResult[]> {
     const { orderedServices } = await this.resolvePlanTargets(targets, false);
-    const results: SupervisorServiceResult[] = [];
 
-    for (const serviceName of orderedServices) {
-      results.push(await this.clearServiceLogs(serviceName));
-    }
-
-    return results;
+    return Promise.all(orderedServices.map((serviceName) => this.clearServiceLogs(serviceName)));
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(): Promise<SupervisorServiceResult[]> {
     if (this.shuttingDown) {
-      return;
+      return [];
     }
 
     this.shuttingDown = true;
@@ -1044,14 +1123,22 @@ export class SupervisorDaemon {
     process.off("exit", this.handleExit);
 
     await this.runHooks(this.config.hooks.beforeDown);
-    await Promise.all(
-      Object.keys(this.state.services).map((serviceName) => this.stopService(serviceName)),
+    const serviceNames = Object.keys(this.state.services);
+    const results = await Promise.all(
+      serviceNames.map((serviceName) => this.stopService(serviceName)),
     );
     await this.waitForChildrenToExit();
+
+    const portResults = await Promise.all(
+      serviceNames.map((serviceName) => this.releaseServicePorts(serviceName)),
+    );
+    results.push(...portResults.flat());
 
     this.server.close();
     await rm(this.paths.socketPath, { force: true });
     await clearSupervisorFiles(this.config.project);
+
+    return results;
   }
 }
 

@@ -34,8 +34,11 @@ export interface ManagedServiceState {
   memoryBytes: number | null;
   pid: number | null;
   cpuPercent: number | null;
+  /** Ports declared for the service, mirrored from the config so the UI can show them. */
+  ports: number[];
   service: string;
   status: ManagedServiceStatus;
+  title: string;
 }
 
 export interface SupervisorState {
