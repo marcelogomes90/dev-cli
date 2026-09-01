@@ -75,6 +75,8 @@ function validateGraph(
     }
   }
 
+  const portOwners = new Map<number, string>();
+
   for (const [serviceName, service] of Object.entries(services)) {
     if (!groups[service.group]) {
       throw new AppError(
@@ -95,6 +97,33 @@ function validateGraph(
         );
       }
     }
+
+    /**
+     * Declared ports are freed before every start, so two services sharing one would kill
+     * each other while a dependency phase starts them in parallel.
+     */
+    for (const port of service.ports) {
+      const owner = portOwners.get(port);
+      if (owner) {
+        throw new AppError(
+          `Services "${owner}" and "${serviceName}" both declare port ${port}. Each port must belong to a single service.`,
+        );
+      }
+
+      portOwners.set(port, serviceName);
+    }
+  }
+}
+
+/**
+ * `stat` follows symlinks, so a config symlinked into the workspace still counts as a file.
+ * The directory entry alone reports it as a link and would drop it from the candidates.
+ */
+async function isConfigFile(candidate: string): Promise<boolean> {
+  try {
+    return (await stat(candidate)).isFile();
+  } catch {
+    return false;
   }
 }
 
@@ -102,13 +131,8 @@ export async function findConfigFile(cwd = process.cwd()): Promise<string> {
   for (const filename of CONFIG_FILES) {
     const candidate = path.join(cwd, filename);
 
-    try {
-      const info = await stat(candidate);
-      if (info.isFile()) {
-        return candidate;
-      }
-    } catch {
-      continue;
+    if (await isConfigFile(candidate)) {
+      return candidate;
     }
   }
 
@@ -118,17 +142,21 @@ export async function findConfigFile(cwd = process.cwd()): Promise<string> {
 }
 
 async function listConfigFiles(cwd: string): Promise<string[]> {
-  let entries;
+  let entries: string[];
   try {
-    entries = await readdir(cwd, { withFileTypes: true });
+    entries = await readdir(cwd);
   } catch {
     return [];
   }
 
-  return entries
-    .filter((entry) => entry.isFile() && CONFIG_FILE_PATTERN.test(entry.name))
-    .map((entry) => path.join(cwd, entry.name))
+  const candidates = entries
+    .filter((entry) => CONFIG_FILE_PATTERN.test(entry))
+    .map((entry) => path.join(cwd, entry))
     .sort();
+
+  const usable = await Promise.all(candidates.map(isConfigFile));
+
+  return candidates.filter((_, index) => usable[index]);
 }
 
 async function parseConfigFile(configPath: string): Promise<ProjectConfigInput> {
