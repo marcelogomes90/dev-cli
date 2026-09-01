@@ -1,4 +1,5 @@
 import type { ManagedServiceState, SupervisorState } from "../core/supervisor";
+import { getServiceLabel, getServicePorts } from "../core/supervisor/service-state";
 import { formatBytes } from "./bytes";
 import { formatRelativeAge } from "./format";
 import type { LogCache } from "./logs";
@@ -19,14 +20,7 @@ export interface ShortcutItem {
   priority: number;
 }
 
-/**
- * Every user-facing surface shows the configured title; the service key stays the identifier
- * used by requests, logs and state lookups. State written before `title` existed falls back
- * to the key so an already running supervisor keeps rendering.
- */
-export function getServiceLabel(service: Pick<ManagedServiceState, "service" | "title">): string {
-  return service.title || service.service;
-}
+export { getServiceLabel };
 
 function colorStatusIndicator(status: ManagedServiceState["status"], value: string): string {
   switch (status) {
@@ -101,6 +95,11 @@ function formatServiceUptime(service: ManagedServiceState, width: number, now: n
   return truncate(getServiceAgeLabel(service, now), width);
 }
 
+function formatServicePorts(service: ManagedServiceState, width: number): string {
+  const ports = getServicePorts(service);
+  return truncate(ports.length > 0 ? ports.join(",") : "--", width);
+}
+
 function formatServiceLogSize(logSize: number | undefined, width: number): string {
   return truncate(logSize === undefined ? "--" : formatBytes(logSize, { largePrecision: 0 }), width);
 }
@@ -122,6 +121,8 @@ export function buildServiceContent(
   const showWideMetadata = innerWidth >= 104;
   const showGroup = showWideMetadata;
   const showTerminalState = showWideMetadata;
+  // Ports only earn a column once every other one already fits without squeezing BRANCH.
+  const showPorts = innerWidth >= 118;
   const statusWidth = compact ? 10 : 12;
   const groupWidth = showGroup ? 10 : 0;
   const pidWidth = showWideMetadata ? 7 : 6;
@@ -129,11 +130,12 @@ export function buildServiceContent(
   const memoryWidth = showWideMetadata ? 8 : 7;
   const cpuWidth = 5;
   const logWidth = showWideMetadata ? 7 : 6;
+  const portWidth = showPorts ? 11 : 0;
   const terminalWidth = showTerminalState ? 4 : 0;
   const compactBranchWidth = Math.min(Math.max(Math.floor(innerWidth * 0.24), 10), 18);
   const compactServiceWidth = Math.max(innerWidth - markerWidth - statusWidth - compactBranchWidth - 2, 12);
-  const metadataWidth = statusWidth + groupWidth + pidWidth + uptimeWidth + memoryWidth + cpuWidth + logWidth + terminalWidth;
-  const separatorWidth = showGroup ? (showTerminalState ? 10 : 8) : 7;
+  const metadataWidth = statusWidth + groupWidth + pidWidth + uptimeWidth + memoryWidth + cpuWidth + logWidth + portWidth + terminalWidth;
+  const separatorWidth = (showGroup ? (showTerminalState ? 10 : 8) : 7) + (showPorts ? 1 : 0);
   const availableWidth = Math.max(
     innerWidth - markerWidth - metadataWidth - separatorWidth,
     26,
@@ -152,10 +154,11 @@ export function buildServiceContent(
   let failedCount = 0;
   let runningCount = 0;
 
+  const portHeader = showPorts ? ` ${truncate("PORT", portWidth)}` : "";
   const header = compact
     ? `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("BRANCH", branchWidth)}`
     : showGroup
-      ? `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("GROUP", groupWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)} ${truncate("UPTIME", uptimeWidth)} ${truncate("MEM", memoryWidth)} ${truncate("CPU", cpuWidth)} ${truncate("LOG", logWidth)} ${truncate("TERM", terminalWidth)}`
+      ? `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("GROUP", groupWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)}${portHeader} ${truncate("UPTIME", uptimeWidth)} ${truncate("MEM", memoryWidth)} ${truncate("CPU", cpuWidth)} ${truncate("LOG", logWidth)} ${truncate("TERM", terminalWidth)}`
       : `${" ".repeat(markerWidth)}${truncate("SERVICE", serviceWidth)} ${truncate("STATUS", statusWidth)} ${truncate("BRANCH", branchWidth)} ${truncate("PID", pidWidth)} ${truncate("UPTIME", uptimeWidth)} ${truncate("MEM", memoryWidth)} ${truncate("CPU", cpuWidth)} ${truncate("LOG", logWidth)}`;
   const headerContent = fg(UI_THEME.tableHeader, header);
 
@@ -181,6 +184,7 @@ export function buildServiceContent(
       const status = formatStatus(service.status, statusWidth, rowColor);
       const branch = fg(rowColor, truncate(service.isGit ? service.branch : "-", branchWidth));
       const pid = fg(rowColor, formatServicePid(service, pidWidth));
+      const ports = showPorts ? ` ${fg(rowColor, formatServicePorts(service, portWidth))}` : "";
       const uptime = fg(rowColor, formatServiceUptime(service, uptimeWidth, now));
       const memory = fg(rowColor, formatServiceMemory(service, memoryWidth));
       const cpu = fg(rowColor, formatServiceCpu(service, cpuWidth));
@@ -196,7 +200,7 @@ export function buildServiceContent(
         compact
           ? `${marker}${name} ${status} ${branch}`
           : showGroup
-            ? `${marker}${name} ${status} ${group} ${branch} ${pid} ${uptime} ${memory} ${cpu} ${logSize} ${terminalState}`
+            ? `${marker}${name} ${status} ${group} ${branch} ${pid}${ports} ${uptime} ${memory} ${cpu} ${logSize} ${terminalState}`
             : `${marker}${name} ${status} ${branch} ${pid} ${uptime} ${memory} ${cpu} ${logSize}`,
       );
     }

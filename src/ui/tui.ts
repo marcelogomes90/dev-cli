@@ -1502,7 +1502,7 @@ export async function openSupervisorTui(config: ProjectConfig): Promise<Supervis
       fallback: string,
     ) => {
       if (pendingServiceActions.has(serviceName)) {
-        setFooterMessage("warning", `${serviceName} is busy with ${pendingServiceActions.get(serviceName)}.`);
+        setFooterMessage("warning", `${resolveServiceLabel(serviceName)} is busy with ${pendingServiceActions.get(serviceName)}.`);
         renderFooter();
         requestScreenRender(true);
         return;

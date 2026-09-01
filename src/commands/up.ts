@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { loadConfigFromArg, stopProject, wrapCommand } from "./helpers";
 import { parseCsvOption } from "../utils/command";
 import { isSupervisorRunning, triggerUpSupervisor, upSupervisor } from "../core/supervisor";
-import { formatSupervisorResponseSummary, printInfo, printSuccess, printWarning } from "../ui/output";
+import { createServiceLabelResolver, formatSupervisorResponseSummary, printInfo, printSuccess, printWarning } from "../ui/output";
 import { openSupervisorTui } from "../ui/tui";
 
 export function registerUpCommand(program: Command): void {
@@ -37,7 +37,14 @@ export function registerUpCommand(program: Command): void {
           throw new Error(response.message ?? "Unable to start supervisor.");
         }
 
-        printSuccess(formatSupervisorResponseSummary(config.project, "services started", response));
+        printSuccess(
+          formatSupervisorResponseSummary(
+            config.project,
+            "services started",
+            response,
+            createServiceLabelResolver(config),
+          ),
+        );
       }),
     );
 }

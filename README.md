@@ -58,7 +58,8 @@ The wizard asks for the project name, groups, services, startup options, and ser
 
 ## Configuration
 
-Create a `.devrc.yml` or `.devrc.yaml` in the workspace root:
+Create a `.devrc.yml` or `.devrc.yaml` in the workspace root (or `.devrc.<project>.yml` when the
+same directory holds more than one project):
 
 ```yaml
 project: amigo-workspace
@@ -123,7 +124,11 @@ services:
 
 ### Notes
 
-- Config files are discovered only in the current workspace root as `.devrc.yml` or `.devrc.yaml`.
+- Config files are discovered only in the current workspace root, as `.devrc.yml`, `.devrc.yaml` or
+  `.devrc.<project>.yml` / `.devrc.<project>.yaml`. Symbolic links pointing at a config file work too.
+- The suffixed form lets one directory hold several projects. `dev up <project>` reads the
+  candidates in alphabetical order and uses the first whose `project` field matches the argument,
+  so the suffix is only a filename convention: the `project` field is what selects the config.
 - `project` in the config must match the `<project>` argument passed to the CLI.
 - Relative `cwd` values are resolved from the directory that contains the config file.
 - `~/` and absolute `cwd` values are supported.
@@ -140,6 +145,9 @@ services:
   listening on them is sent `SIGTERM`, then `SIGKILL` if it survives 2 seconds. This clears orphan
   watchers that outlive the supervisor, so it also kills unrelated processes bound to those ports.
 - Only ports declared with `port` are ever touched. Leave it out for services managed by Docker.
+- Two services cannot declare the same port. The config is rejected, because a shared port would
+  make one service kill the other when a dependency phase starts them together.
+- Declared ports are shown in the UI `PORT` column on terminals wide enough for it.
 - Hooks run in the workspace root using the current shell environment.
 - Service commands and install commands run through the current shell from each service `cwd`.
 

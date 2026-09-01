@@ -25,7 +25,7 @@ import { clearSupervisorFiles, ensureSupervisorDirs, getSupervisorPaths } from "
 import { readProcessTreeResourceMetrics, type ProcessResourceSample } from "./process-metrics";
 import { sanitizeLogChunk } from "./log-sanitizer";
 import { buildShellSpawn, resolveRuntimeShell } from "./runtime";
-import { createServiceState } from "./service-state";
+import { createServiceState, getServiceLabel } from "./service-state";
 import { loadSupervisorState, saveSupervisorState } from "./state";
 import type {
   ManagedServiceState,
@@ -297,13 +297,19 @@ export class SupervisorDaemon {
           results: [result],
         };
       }
-      case "shutdown":
+      case "shutdown": {
+        const results = await this.shutdown();
+        const failed = results.filter((result) => !result.ok);
+
         return {
           id: request.id,
-          message: "Supervisor stopped.",
-          ok: true,
-          results: await this.shutdown(),
+          message: failed.length > 0
+            ? `Supervisor stopped, but ${failed.length} of ${results.length} steps failed.`
+            : "Supervisor stopped.",
+          ok: failed.length === 0,
+          results,
         };
+      }
       default:
         return { id: request.id, ok: false, message: `Unsupported request type "${request.type}".` };
     }
@@ -447,7 +453,7 @@ export class SupervisorDaemon {
     return {
       service: serviceName,
       ok: false,
-      message: `${serviceName} is not a git repository.`,
+      message: `${getServiceLabel(entry)} is not a git repository.`,
     };
   }
 

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { chmod, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { execa } from "execa";
 
 const projectRoot = process.cwd();
@@ -364,6 +364,51 @@ test("loadProjectConfig fails when the directory has no config file", async () =
   );
 });
 
+test("loadProjectConfig accepts a config that is a symbolic link", async () => {
+  const sourceDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-symlink-source-"));
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-symlink-"));
+  const sourcePath = path.join(sourceDir, "shared.yml");
+  await writeFile(sourcePath, minimalConfig("amigo"));
+  await symlink(sourcePath, path.join(fixtureDir, ".devrc.yml"));
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+  const config = await loadProjectConfig("amigo", fixtureDir);
+
+  assert.equal(config.project, "amigo");
+  assert.equal(config.configPath, path.join(fixtureDir, ".devrc.yml"));
+});
+
+test("loadProjectConfig rejects the same port declared by two services", async () => {
+  const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-duplicate-port-"));
+  await writeFile(
+    path.join(fixtureDir, ".devrc.yml"),
+    [
+      "project: amigo",
+      "groups:",
+      "  api:",
+      "    services: [api-main, api-gateway]",
+      "services:",
+      "  api-main:",
+      "    cwd: .",
+      "    command: yarn dev",
+      "    group: api",
+      "    port: 3021",
+      "  api-gateway:",
+      "    cwd: .",
+      "    command: yarn dev",
+      "    group: api",
+      "    port: [4021, 3021]",
+    ].join("\n"),
+  );
+
+  const { loadProjectConfig } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  await assert.rejects(
+    loadProjectConfig("amigo", fixtureDir),
+    /Services "api-main" and "api-gateway" both declare port 3021\./,
+  );
+});
+
 test("loadProjectConfig prefixes validation errors with the offending file name", async () => {
   const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "dev-cli-invalid-config-"));
   await writeFile(path.join(fixtureDir, ".devrc.broken.yml"), "project: 123\n");
@@ -527,6 +572,54 @@ test("services are listed by title and fall back to the service key", async () =
     describeServiceActionBlock("restart", untitled),
     "ledger cannot restart from status stopped.",
   );
+});
+
+test("the services table shows a PORT column on wide screens", async () => {
+  const { buildServiceContent } = await import(path.join(projectRoot, "dist/lib.js"));
+
+  const withPorts = {
+    branch: "main",
+    command: "node server.js",
+    cpuPercent: null,
+    cwd: "/tmp",
+    exitCode: null,
+    group: "api",
+    installCommand: "yarn",
+    isGit: true,
+    lastStartedAt: null,
+    lastStoppedAt: null,
+    logPath: "/tmp/checkout-api.log",
+    memoryBytes: null,
+    pid: null,
+    ports: [3009, 5173],
+    service: "checkout-api",
+    status: "stopped",
+    title: "Checkout API",
+  };
+  // State written before `ports` existed: an already running supervisor keeps rendering.
+  const legacy = { ...withPorts, logPath: "/tmp/ledger.log", ports: undefined, service: "ledger", title: "Ledger" };
+
+  const state = {
+    configPath: "/tmp/.devrc.yml",
+    groups: { api: ["checkout-api", "ledger"] },
+    pid: 1,
+    project: "amigo",
+    rootDir: "/tmp",
+    services: { "checkout-api": withPorts, ledger: legacy },
+    socketPath: "/tmp/dev.sock",
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const wide = stripBlessedTags(buildServiceContent(state, "checkout-api", 140).headerContent);
+  assert.match(wide, /PORT/);
+
+  const rows = stripBlessedTags(buildServiceContent(state, "checkout-api", 140).content).split("\n");
+  assert.match(rows[0], /3009,5173/);
+  assert.match(rows[1], /--/);
+
+  const narrow = stripBlessedTags(buildServiceContent(state, "checkout-api", 100).headerContent);
+  assert.doesNotMatch(narrow, /PORT/);
 });
 
 test("buildQuitAndDownMessage mentions embedded terminal sessions when they exist", async () => {

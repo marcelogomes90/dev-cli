@@ -48,10 +48,16 @@ export function formatServiceResultLine(
   return `${result.ok ? "✓" : "✗"} ${label}: ${result.message}`;
 }
 
+/** Maps a service key coming back from the supervisor to the title shown to the user. */
+export function createServiceLabelResolver(config: ProjectConfig): (serviceName: string) => string {
+  return (serviceName) => config.services[serviceName]?.title ?? serviceName;
+}
+
 export function formatSupervisorResponseSummary(
   project: string,
   action: string,
   response: SupervisorResponse,
+  resolveLabel: (serviceName: string) => string = (serviceName) => serviceName,
 ): string {
   const results = response.results ?? [];
   if (results.length === 0) {
@@ -61,7 +67,7 @@ export function formatSupervisorResponseSummary(
   const failed = results.filter((result) => !result.ok);
   if (failed.length > 0) {
     const first = failed[0];
-    return `${project}: ${results.length - failed.length}/${results.length} ${action}; ${first.service}: ${first.message}`;
+    return `${project}: ${results.length - failed.length}/${results.length} ${action}; ${resolveLabel(first.service)}: ${first.message}`;
   }
 
   return `${project}: ${results.length}/${results.length} ${action}.`;
@@ -172,6 +178,7 @@ export function buildStatusTableFromConfig(config: ProjectConfig): StatusTableDa
     logPath: "",
     memoryBytes: null,
     pid: null,
+    ports: service.ports,
     service: service.name,
     status: "stopped" as const,
     title: service.title,

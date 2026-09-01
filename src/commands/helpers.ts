@@ -2,6 +2,7 @@ import { loadProjectConfig, type ProjectConfig } from "../core/config";
 import { isSupervisorRunning, shutdownSupervisor } from "../core/supervisor";
 import { getErrorMessage } from "../utils/errors";
 import {
+  createServiceLabelResolver,
   formatServiceResultLine,
   printDetail,
   printError,
@@ -36,12 +37,15 @@ export async function stopProject(config: ProjectConfig): Promise<void> {
   printInfo(`${config.project}: stopping services and releasing ports...`);
 
   const response = await shutdownSupervisor(config);
-  if (!response.ok) {
-    throw new Error(response.message ?? "Unable to stop supervisor.");
+  const resolveLabel = createServiceLabelResolver(config);
+
+  // Printed before the failure check so the user sees which service refused to stop.
+  for (const result of response.results ?? []) {
+    printDetail(formatServiceResultLine(result, resolveLabel(result.service)));
   }
 
-  for (const result of response.results ?? []) {
-    printDetail(formatServiceResultLine(result, config.services[result.service]?.title ?? result.service));
+  if (!response.ok) {
+    throw new Error(response.message ?? "Unable to stop supervisor.");
   }
 
   printSuccess(`${config.project}: stopped.`);
