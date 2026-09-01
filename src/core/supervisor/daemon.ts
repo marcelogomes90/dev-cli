@@ -85,6 +85,26 @@ function setResourceMetrics(
   return true;
 }
 
+/**
+ * A service that survives SIGKILL keeps its process alive after `down`, so the response has to
+ * fail instead of reporting a clean stop.
+ */
+export function buildShutdownResponse(
+  id: string,
+  results: SupervisorServiceResult[],
+): SupervisorResponse {
+  const failed = results.filter((result) => !result.ok);
+
+  return {
+    id,
+    message: failed.length > 0
+      ? `Supervisor stopped, but ${failed.length} of ${results.length} steps failed.`
+      : "Supervisor stopped.",
+    ok: failed.length === 0,
+    results,
+  };
+}
+
 export class SupervisorDaemon {
   private readonly children = new Map<string, ManagedChild>();
   private readonly config: ProjectConfig;
@@ -297,19 +317,8 @@ export class SupervisorDaemon {
           results: [result],
         };
       }
-      case "shutdown": {
-        const results = await this.shutdown();
-        const failed = results.filter((result) => !result.ok);
-
-        return {
-          id: request.id,
-          message: failed.length > 0
-            ? `Supervisor stopped, but ${failed.length} of ${results.length} steps failed.`
-            : "Supervisor stopped.",
-          ok: failed.length === 0,
-          results,
-        };
-      }
+      case "shutdown":
+        return buildShutdownResponse(request.id, await this.shutdown());
       default:
         return { id: request.id, ok: false, message: `Unsupported request type "${request.type}".` };
     }
